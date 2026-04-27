@@ -1,4 +1,4 @@
-# wizard-ops
+# wiz-ops
 
 Operational scripts and tooling for the [story-wizard](https://github.com/story-wizard) repositories.
 
