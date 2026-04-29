@@ -30,7 +30,7 @@ Sets up a full, isolated PR review environment for a given repo and PR number.
 **Arguments:**
 
 | Argument | Description |
-|---|---|
+| --- | --- |
 | `repo` | One of: `wizard`, `wizard-ai`, `wizard-core` |
 | `pr_number` | The PR number (numeric) |
 | `agent_type` | Optional one of: `claude-code`, `codex`, `opencode`. Defaults to `claude-code` |
