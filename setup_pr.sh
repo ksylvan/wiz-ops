@@ -25,22 +25,25 @@ format_options() {
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") <repo> <pr_number> [agent_type]
+Usage: $(basename "$0") [--no-run] <repo> <pr_number> [agent_type]
 
 Set up a PR review worktree with Maestro autorun playbooks.
 
 Arguments:
     repo        Repository name. Valid options: $(format_options "${VALID_REPOS[@]}")
-  pr_number   Pull request number (numeric)
-    agent_type  Optional Maestro agent type. Valid options: $(format_options "${VALID_AGENT_TYPES[@]}"). Default: claude-code
+    pr_number   Pull request number (numeric)
+    agent_type  Optional Maestro agent type.
+                Valid options: $(format_options "${VALID_AGENT_TYPES[@]}"). Default: claude-code
 
 Options:
-  -h, --help  Show this help message and exit
+  -h, --help    Show this help message and exit
+  --no-run      Set up the agent but skip the final auto-run launch
 
 Examples:
   $(basename "$0") wizard-core 209
   $(basename "$0") wizard 42
   $(basename "$0") wizard-ai 101 codex
+  $(basename "$0") --no-run wizard-core 209
 EOF
 }
 
@@ -56,8 +59,19 @@ if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     exit 0
 fi
 
+# Parse optional flags before positional arguments
+no_run=false
+args=()
+for arg in "$@"; do
+    case "$arg" in
+        --no-run) no_run=true ;;
+        *) args+=("$arg") ;;
+    esac
+done
+set -- "${args[@]}"
+
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-    echo "Error: Expected 2 or 3 arguments, got #$." >&2
+    echo "Error: Expected 2 or 3 arguments, got $#." >&2
     usage >&2
     exit 1
 fi
@@ -185,5 +199,11 @@ jq . "${tmp_json}"
 agent_id=$(jq -r .agentId "${tmp_json}")
 
 # --------- Trigger the auto-run
-sleep 5
-node "${maestro_cli}" auto-run -a "${agent_id}" "${playbook_dest}"/* --launch
+if [[ "$no_run" == "true" ]]; then
+    printf "\n%s\n" "--no-run specified: skipping auto-run launch."
+    echo "  Agent ID : ${agent_id}"
+    echo "  To launch manually: node ${maestro_cli} auto-run -a ${agent_id} ${playbook_dest}/* --launch"
+else
+    sleep 5
+    node "${maestro_cli}" auto-run -a "${agent_id}" "${playbook_dest}"/* --launch
+fi
