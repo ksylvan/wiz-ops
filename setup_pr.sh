@@ -4,7 +4,7 @@
 #
 # Usage: setup_pr.sh <repo> <pr_number> [agent_type]
 
-VALID_REPOS=(wizard wizard-ai wizard-core)
+VALID_REPOS=(wizard wizard-ai wizard-core wizard-release)
 VALID_AGENT_TYPES=(claude-code codex opencode)
 PLAYBOOKS_SOURCE="${HOME}/src/maestro-playbooks-custom/playbooks/Code_Review"
 ZSHRC_FUNCTIONS="${HOME}/.zshrc.d/80-git-worktrees.zsh"
