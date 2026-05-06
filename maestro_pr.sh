@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# setup_pr.sh — Set up a PR review worktree with Maestro autorun playbooks.
+# maestro_pr.sh — Set up a PR review worktree with Maestro autorun playbooks.
 #
-# Usage: setup_pr.sh [--no-run] <repo> <pr_number> [agent_type]
+# Usage: maestro_pr.sh [--no-run] <repo> <pr_number> [agent_type]
 #
 # Delegates worktree, autorun-dir, and agent creation to ./maestro_wt.sh,
 # then layers in the PR-specific bits: playbook copy, PR-URL substitution,
@@ -142,7 +142,7 @@ echo "PR #${pr_number} validated: open, not a draft."
 
 worktree_label="pr-${pr_number}"
 nudge_message="Do not make any changes this is only a review task."
-agent_json="/tmp/setup_pr_agent$$.json"
+agent_json="/tmp/maestro_pr_agent$$.json"
 trap 'rm -f "${agent_json}"' EXIT INT TERM
 
 "${MAESTRO_WT}" \

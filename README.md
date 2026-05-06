@@ -17,14 +17,14 @@ This repo collects convenience scripts that support day-to-day development workf
 
 ## Scripts
 
-### `setup_pr.sh` — PR Review Setup
+### `maestro_pr.sh` — PR Review Setup
 
 Sets up a full, isolated PR review environment for a given repo and PR number.
 
 **Usage:**
 
 ```zsh
-./setup_pr.sh [--no-run] <repo> <pr_number> [agent_type]
+./maestro_pr.sh [--no-run] <repo> <pr_number> [agent_type]
 ```
 
 **Arguments:**
@@ -44,10 +44,10 @@ Sets up a full, isolated PR review environment for a given repo and PR number.
 **Examples:**
 
 ```zsh
-./setup_pr.sh wizard-core 209
-./setup_pr.sh wizard 42
-./setup_pr.sh wizard-ai 101 codex
-./setup_pr.sh --no-run wizard-core 209
+./maestro_pr.sh wizard-core 209
+./maestro_pr.sh wizard 42
+./maestro_pr.sh wizard-ai 101 codex
+./maestro_pr.sh --no-run wizard-core 209
 ```
 
 **What it does:**
@@ -106,7 +106,7 @@ The final worktree and agent are both named `<repo>-<worktree_name>-<agent_type>
 2. Creates the matching autorun directory under `~/wizard/worktrees/autorun/<repo>/<worktree>/`
 3. Creates a Maestro agent scoped to the worktree using the selected `agent_type` (default: `claude-code`), pointed at the autorun directory
 
-Unlike `setup_pr.sh`, this script does **not** copy any playbooks, does not check
+Unlike `maestro_pr.sh`, this script does **not** copy any playbooks, does not check
 out a PR, and does not trigger an auto-run launch — the worktree starts on the
 default branch and the agent has no nudge message. Drop your own playbooks into
 the autorun directory if/when you want to run them.
