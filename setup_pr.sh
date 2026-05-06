@@ -2,12 +2,18 @@
 
 # setup_pr.sh — Set up a PR review worktree with Maestro autorun playbooks.
 #
-# Usage: setup_pr.sh <repo> <pr_number> [agent_type]
+# Usage: setup_pr.sh [--no-run] <repo> <pr_number> [agent_type]
+#
+# Delegates worktree, autorun-dir, and agent creation to ./maestro_wt.sh,
+# then layers in the PR-specific bits: playbook copy, PR-URL substitution,
+# `gh pr checkout`, and the auto-run launch.
 
 VALID_REPOS=(wizard wizard-ai wizard-core wizard-release)
 VALID_AGENT_TYPES=(claude-code codex opencode)
 PLAYBOOKS_SOURCE="${HOME}/src/maestro-playbooks-custom/playbooks/Code_Review"
-ZSHRC_FUNCTIONS="${HOME}/.zshrc.d/80-git-worktrees.zsh"
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+MAESTRO_WT="${script_dir}/maestro_wt.sh"
 
 format_options() {
     local formatted=""
@@ -80,7 +86,7 @@ repo="$1"
 pr_number="$2"
 agent_type="${3:-claude-code}"
 
-# Validate repo name
+# Validate repo name (also checked by maestro_wt.sh, but we need it here for the PR fetch)
 repo_valid=false
 for valid_repo in "${VALID_REPOS[@]}"; do
     if [[ "$repo" == "$valid_repo" ]]; then
@@ -97,7 +103,7 @@ fi
 # Validate PR number is numeric
 [[ "$pr_number" =~ ^[0-9]+$ ]] || die "PR number must be numeric, got '${pr_number}'"
 
-# Validate agent type
+# Validate agent type up front so a typo doesn't waste a gh call
 agent_type_valid=false
 for valid_agent_type in "${VALID_AGENT_TYPES[@]}"; do
     if [[ "$agent_type" == "$valid_agent_type" ]]; then
@@ -130,27 +136,31 @@ pr_is_draft=$(echo "$pr_json" | jq -r '.isDraft')
 
 echo "PR #${pr_number} validated: open, not a draft."
 
-# ---------- source helper functions ----------
+# ---------- delegate worktree + agent creation to maestro_wt.sh ----------
 
-# shellcheck disable=SC1090
-source "${ZSHRC_FUNCTIONS}" || die "Cannot source ${ZSHRC_FUNCTIONS}"
+[[ -x "$MAESTRO_WT" ]] || die "maestro_wt.sh not found or not executable at ${MAESTRO_WT}"
 
-# ---------- create worktree ----------
+worktree_label="pr-${pr_number}"
+nudge_message="Do not make any changes this is only a review task."
+agent_json="/tmp/setup_pr_agent$$.json"
+trap 'rm -f "${agent_json}"' EXIT INT TERM
 
-worktree_name="${repo}-pr-${pr_number}-${agent_type}"
+"${MAESTRO_WT}" \
+    --nudge "${nudge_message}" \
+    --json-out "${agent_json}" \
+    "${repo}" "${worktree_label}" "${agent_type}" \
+    || die "maestro_wt.sh failed"
 
-printf "\n%s" "Changing to ~/wizard/${repo}..."
-cd "${HOME}/wizard/${repo}" || die "Cannot cd to ${HOME}/wizard/${repo}"
+worktree_name="${repo}-${worktree_label}-${agent_type}"
+worktree_dir="${HOME}/wizard/worktrees/${repo}/${worktree_name}"
+autorun_dir="${HOME}/wizard/worktrees/autorun/${repo}/${worktree_name}"
 
-echo "Creating worktree '${worktree_name}'..."
-make_worktree_here "${worktree_name}" || die "make_worktree_here failed"
-
-printf "\n%s" "Creating autorun directories..."
-make_autorun_dirs || die "make_autorun_dirs failed"
+agent_id=$(jq -r .agentId "${agent_json}") \
+    || die "Failed to extract agentId from ${agent_json}"
+[[ -n "$agent_id" && "$agent_id" != "null" ]] || die "agentId missing in ${agent_json}"
 
 # ---------- set up playbooks ----------
 
-autorun_dir="${HOME}/wizard/worktrees/autorun/${repo}/${worktree_name}"
 playbook_dest="${autorun_dir}/development/code-review"
 
 printf "\n%s" "Setting up Code Review playbooks in ${playbook_dest}..."
@@ -168,40 +178,23 @@ echo "Playbooks configured."
 
 # ---------- checkout PR in worktree ----------
 
-worktree_dir="${HOME}/wizard/worktrees/${repo}/${worktree_name}"
 printf "\n%s" "Checking out PR #${pr_number} in worktree at ${worktree_dir}..."
 pushd "${worktree_dir}" || die "Cannot cd to ${worktree_dir}"
 gh pr checkout "$pr_number" || { popd || exit ; die "gh pr checkout failed"; }
 popd || exit
 
-printf "\n%s" "Worktree and auto-run setup done!"
+printf "\n%s\n" "PR review setup done!"
 echo "  Worktree : ${worktree_dir}"
 echo "  Playbooks: ${playbook_dest}"
+echo "  Agent ID : ${agent_id}"
 
-# --------- create Claude Code agent and start auto-run ----
+# --------- Trigger the auto-run ----------
 
 export MAESTRO_USER_DATA="$HOME/Library/Application Support/maestro-dev"
 maestro_cli="$HOME/src/worktrees/Maestro/preview/dist/cli/maestro-cli.js"
-nudge_message="Do not make any changes this is only a review task."
-agent_name="${repo}-pr-${pr_number}-${agent_type}"
 
-tmp_json=/tmp/maestro_agent$$.json
-trap 'rm -f ${tmp_json}' EXIT INT TERM
-
-node "${maestro_cli}" create-agent -d "${worktree_dir}" -t "${agent_type}" \
-    --nudge "${nudge_message}" --auto-run-folder "${autorun_dir}" \
-    "${agent_name}" --json > "${tmp_json}"
-
-cat "${tmp_json}"
-
-printf "\n%s" "Agent Created!"
-jq . "${tmp_json}"
-agent_id=$(jq -r .agentId "${tmp_json}")
-
-# --------- Trigger the auto-run
 if [[ "$no_run" == "true" ]]; then
     printf "\n%s\n" "--no-run specified: skipping auto-run launch."
-    echo "  Agent ID : ${agent_id}"
     echo "  To launch manually: node ${maestro_cli} auto-run -a ${agent_id} ${playbook_dest}/* --launch"
 else
     sleep 5

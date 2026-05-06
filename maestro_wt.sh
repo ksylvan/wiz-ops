@@ -24,7 +24,7 @@ format_options() {
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") <repo> <worktree_name> [agent_type]
+Usage: $(basename "$0") [--nudge MSG] [--json-out PATH] <repo> <worktree_name> [agent_type]
 
 Set up a named worktree for use with a Maestro agent.
 
@@ -35,12 +35,17 @@ Arguments:
                     Valid options: $(format_options "${VALID_AGENT_TYPES[@]}"). Default: claude-code
 
 Options:
-  -h, --help    Show this help message and exit
+  -h, --help        Show this help message and exit
+  --nudge MSG       Pass MSG as the nudge message when creating the agent
+  --json-out PATH   Write the create-agent JSON response to PATH (caller-managed).
+                    Without this flag the JSON is written to a temp file that is
+                    removed on exit.
 
 Examples:
   $(basename "$0") wizard-core my-feature
   $(basename "$0") wizard refactor-auth
   $(basename "$0") wizard-ai experiment codex
+  $(basename "$0") --nudge "review only" --json-out /tmp/a.json wizard-core pr-209
 EOF
 }
 
@@ -56,8 +61,47 @@ if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     exit 0
 fi
 
+nudge_message=""
+json_out=""
+positional=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --nudge)
+            [[ $# -ge 2 ]] || die "--nudge requires an argument"
+            nudge_message="$2"
+            shift 2
+            ;;
+        --json-out)
+            [[ $# -ge 2 ]] || die "--json-out requires an argument"
+            json_out="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            while [[ $# -gt 0 ]]; do
+                positional+=("$1")
+                shift
+            done
+            ;;
+        -*)
+            die "Unknown option: $1"
+            ;;
+        *)
+            positional+=("$1")
+            shift
+            ;;
+    esac
+done
+
+set -- "${positional[@]}"
+
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-    echo "Error: Expected 2 or 3 arguments, got $#." >&2
+    echo "Error: Expected 2 or 3 positional arguments, got $#." >&2
     usage >&2
     exit 1
 fi
@@ -130,14 +174,22 @@ export MAESTRO_USER_DATA="$HOME/Library/Application Support/maestro-dev"
 maestro_cli="$HOME/src/worktrees/Maestro/preview/dist/cli/maestro-cli.js"
 agent_name="${repo}-${wt_name}-${agent_type}"
 
-tmp_json=/tmp/maestro_agent$$.json
-trap 'rm -f ${tmp_json}' EXIT INT TERM
+if [[ -n "$json_out" ]]; then
+    out_path="$json_out"
+else
+    out_path="/tmp/maestro_agent$$.json"
+    trap 'rm -f "${out_path}"' EXIT INT TERM
+fi
 
-node "${maestro_cli}" create-agent -d "${worktree_dir}" -t "${agent_type}" \
-    --auto-run-folder "${autorun_dir}" \
-    "${agent_name}" --json > "${tmp_json}"
+create_args=(create-agent -d "${worktree_dir}" -t "${agent_type}")
+if [[ -n "$nudge_message" ]]; then
+    create_args+=(--nudge "${nudge_message}")
+fi
+create_args+=(--auto-run-folder "${autorun_dir}" "${agent_name}" --json)
 
-cat "${tmp_json}"
+node "${maestro_cli}" "${create_args[@]}" > "${out_path}"
+
+cat "${out_path}"
 
 printf "\n%s" "Agent Created!"
-jq . "${tmp_json}"
+jq . "${out_path}"

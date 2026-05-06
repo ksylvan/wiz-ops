@@ -53,12 +53,11 @@ Sets up a full, isolated PR review environment for a given repo and PR number.
 **What it does:**
 
 1. Validates the PR is open and not a draft
-2. Creates a git worktree named `<repo>-<pr_number>` under `~/wizard/worktrees/<repo>/`
-3. Creates autorun directories and copies Code Review playbooks into `~/wizard/worktrees/autorun/<repo>/<worktree>/development/code-review/`
+2. Delegates to [`maestro_wt.sh`](#maestro_wtsh--named-worktree--maestro-agent) to create the worktree (named `<repo>-pr-<pr_number>-<agent_type>`), set up the autorun directory, and create a Maestro agent with the "no changes" nudge
+3. Copies Code Review playbooks into `~/wizard/worktrees/autorun/<repo>/<worktree>/development/code-review/`
 4. Patches the correct PR URL into `1_ANALYZE_CHANGES.md`
 5. Checks out the PR branch in the worktree via `gh pr checkout`
-6. Creates a Maestro agent scoped to the worktree using the selected `agent_type` (default: `claude-code`) with a "no changes" nudge message
-7. Triggers the auto-run sequence against the playbooks
+6. Triggers the auto-run sequence against the playbooks (skipped with `--no-run`)
 
 The agent is always nudged with: _"Do not make any changes this is only a review task."_
 Worktree cleanup is left to the user after the review is complete.
@@ -72,7 +71,7 @@ feature work, experiments, or refactors driven by a Maestro agent.
 **Usage:**
 
 ```zsh
-./maestro_wt.sh <repo> <worktree_name> [agent_type]
+./maestro_wt.sh [--nudge MSG] [--json-out PATH] <repo> <worktree_name> [agent_type]
 ```
 
 **Arguments:**
@@ -85,12 +84,20 @@ feature work, experiments, or refactors driven by a Maestro agent.
 
 The final worktree and agent are both named `<repo>-<worktree_name>-<agent_type>`.
 
+**Options:**
+
+| Flag | Description |
+| --- | --- |
+| `--nudge MSG` | Pass `MSG` as the nudge message when creating the agent. Without this flag, the agent is created with no nudge |
+| `--json-out PATH` | Write the `create-agent` JSON response to `PATH` (caller-managed). Without this flag, the JSON is written to a temp file that is removed on exit. Primarily useful when invoking `maestro_wt.sh` from another script that needs the resulting `agentId` |
+
 **Examples:**
 
 ```zsh
 ./maestro_wt.sh wizard-core my-feature
 ./maestro_wt.sh wizard refactor-auth
 ./maestro_wt.sh wizard-ai experiment codex
+./maestro_wt.sh --nudge "review only" --json-out /tmp/a.json wizard-core pr-209
 ```
 
 **What it does:**
