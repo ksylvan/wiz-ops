@@ -137,7 +137,7 @@ source "${ZSHRC_FUNCTIONS}" || die "Cannot source ${ZSHRC_FUNCTIONS}"
 
 # ---------- create worktree ----------
 
-worktree_name="${repo}-${pr_number}"
+worktree_name="${repo}-pr-${pr_number}-${agent_type}"
 
 printf "\n%s" "Changing to ~/wizard/${repo}..."
 cd "${HOME}/wizard/${repo}" || die "Cannot cd to ${HOME}/wizard/${repo}"
@@ -183,7 +183,7 @@ echo "  Playbooks: ${playbook_dest}"
 export MAESTRO_USER_DATA="$HOME/Library/Application Support/maestro-dev"
 maestro_cli="$HOME/src/worktrees/Maestro/preview/dist/cli/maestro-cli.js"
 nudge_message="Do not make any changes this is only a review task."
-agent_name="${repo}-pr-${pr_number}"
+agent_name="${repo}-pr-${pr_number}-${agent_type}"
 
 tmp_json=/tmp/maestro_agent$$.json
 trap 'rm -f ${tmp_json}' EXIT INT TERM
