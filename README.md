@@ -110,3 +110,36 @@ Unlike `maestro_pr.sh`, this script does **not** copy any playbooks, does not ch
 out a PR, and does not trigger an auto-run launch — the worktree starts on the
 default branch and the agent has no nudge message. Drop your own playbooks into
 the autorun directory if/when you want to run them.
+
+### `maestro_id.sh` — Agent UUID Lookup
+
+Looks up a Maestro agent's UUID by its exact name. Useful for scripting or when you need the `agentId` to send messages via `maestro_dev_cli send`.
+
+**Usage:**
+
+```zsh
+./maestro_id.sh <agent_name>
+```
+
+**Arguments:**
+
+| Argument | Description |
+| --- | --- |
+| `agent_name` | The exact name of the Maestro agent |
+
+**Options:**
+
+| Flag | Description |
+| --- | --- |
+| `-h, --help` | Show help and exit |
+
+**Examples:**
+
+```zsh
+./maestro_id.sh Wiz-Devel
+./maestro_id.sh wizard-pr-345-claude-code
+```
+
+**What it does:**
+
+Parses the output of `maestro_dev_cli list agents` and prints the UUID of the named agent to stdout. Exits non-zero if no agent matches or if multiple agents share the same name (prints a warning with all matching UUIDs in that case).
