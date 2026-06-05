@@ -2,7 +2,7 @@
 
 # maestro_pr.sh — Set up a PR review worktree with Maestro autorun playbooks.
 #
-# Usage: maestro_pr.sh [--no-run] <repo> <pr_number> [agent_type]
+# Usage: maestro_pr.sh [--no-run] [--draft-ok] <repo> <pr_number> [agent_type]
 #
 # Delegates worktree, autorun-dir, and agent creation to ./maestro_wt.sh,
 # then layers in the PR-specific bits: playbook copy, PR-URL substitution,
@@ -31,7 +31,7 @@ format_options() {
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--no-run] <repo> <pr_number> [agent_type]
+Usage: $(basename "$0") [--no-run] [--draft-ok] <repo> <pr_number> [agent_type]
 
 Set up a PR review worktree with Maestro autorun playbooks.
 
@@ -44,12 +44,14 @@ Arguments:
 Options:
   -h, --help    Show this help message and exit
   --no-run      Set up the agent but skip the final auto-run launch
+  --draft-ok    Allow reviewing draft PRs (skip the draft check)
 
 Examples:
   $(basename "$0") wizard-core 209
   $(basename "$0") wizard 42
   $(basename "$0") wizard-ai 101 codex
   $(basename "$0") --no-run wizard-core 209
+  $(basename "$0") --draft-ok wizard-core 209
 EOF
 }
 
@@ -67,10 +69,12 @@ fi
 
 # Parse optional flags before positional arguments
 no_run=false
+draft_ok=false
 args=()
 for arg in "$@"; do
     case "$arg" in
-        --no-run) no_run=true ;;
+        --no-run)   no_run=true ;;
+        --draft-ok) draft_ok=true ;;
         *) args+=("$arg") ;;
     esac
 done
@@ -131,10 +135,16 @@ pr_is_draft=$(echo "$pr_json" | jq -r '.isDraft')
 
 [[ "$pr_state" == "OPEN" ]] \
     || die "PR #${pr_number} is not open (state: ${pr_state})"
-[[ "$pr_is_draft" == "false" ]] \
-    || die "PR #${pr_number} is a draft"
+if [[ "$draft_ok" == "false" ]]; then
+    [[ "$pr_is_draft" == "false" ]] \
+        || die "PR #${pr_number} is a draft (use --draft-ok to allow)"
+fi
 
-echo "PR #${pr_number} validated: open, not a draft."
+if [[ "$pr_is_draft" == "true" ]]; then
+    echo "PR #${pr_number} validated: open (draft, --draft-ok set)."
+else
+    echo "PR #${pr_number} validated: open, not a draft."
+fi
 
 # ---------- delegate worktree + agent creation to maestro_wt.sh ----------
 
