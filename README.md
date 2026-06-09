@@ -11,9 +11,47 @@ This repo collects convenience scripts that support day-to-day development workf
 - [`gh`](https://cli.github.com/) — GitHub CLI, authenticated
 - [`jq`](https://stedolan.github.io/jq/)
 - [`node`](https://nodejs.org/) (for the Maestro CLI)
-- A local clone of the [Maestro](https://github.com/ksylvan/Maestro) `preview` worktree at `~/src/worktrees/Maestro/preview`
-- Code Review playbooks at `~/src/maestro-playbooks-custom/playbooks/Code_Review/`
+- The [Maestro](https://github.com/ksylvan/Maestro) CLI — either the installed app at `/Applications/Maestro.app` or a local `preview` worktree (see [Maestro CLI resolution](#maestro-cli-resolution) below)
+- Code Review playbooks — preferably checked out locally at `~/src/Maestro-Playbooks/Development/Code-Review`, otherwise fetched from GitHub automatically (see [Code Review playbook source](#code-review-playbook-source) below)
 - Worktree helper functions sourced from `~/.zshrc.d/80-git-worktrees.zsh`
+
+## Maestro CLI resolution
+
+All scripts resolve the `maestro-cli.js` to run (and whether to override
+`MAESTRO_USER_DATA`) through the shared helper [`_maestro_env.sh`](./_maestro_env.sh),
+which they source on startup. Resolution order:
+
+1. **`.env`** — if a `.env` file sits next to the scripts, it is sourced first.
+   Use it to point at a checked-out rc/preview branch (see below).
+2. **`MAESTRO_CLI_JS`** — if set (typically from `.env` or the environment), it
+   wins, and `MAESTRO_USER_DATA` is honored as given.
+3. **Installed app** — otherwise, if `/Applications/Maestro.app/Contents/Resources/maestro-cli.js`
+   exists, that CLI is used and `MAESTRO_USER_DATA` is left **unset** so the app
+   uses its own data directory.
+4. **Dev fallback** — otherwise the scripts fall back to
+   `~/src/worktrees/Maestro/preview/dist/cli/maestro-cli.js` with
+   `MAESTRO_USER_DATA` pointed at `~/Library/Application Support/maestro-dev`.
+
+### Running against a checked-out rc branch (developers)
+
+When developing Maestro itself, you'll want the scripts to drive your
+**checked-out rc/preview build and its dev data dir** instead of the installed
+app. Copy the example file and adjust the paths to your worktree:
+
+```zsh
+cp .env.example .env
+# then edit .env if your worktree lives somewhere else
+```
+
+The default `.env.example` contents:
+
+```sh
+export MAESTRO_USER_DATA="$HOME/Library/Application Support/maestro-dev"
+export MAESTRO_CLI_JS="$HOME/src/worktrees/Maestro/preview/dist/cli/maestro-cli.js"
+```
+
+`.env` is git-ignored, so your local override never gets committed. Delete it
+(or unset the variables) to switch back to the installed app.
 
 ## Scripts
 
@@ -54,13 +92,27 @@ Sets up a full, isolated PR review environment for a given repo and PR number.
 
 1. Validates the PR is open and not a draft
 2. Delegates to [`maestro_wt.sh`](#maestro_wtsh--named-worktree--maestro-agent) to create the worktree (named `<repo>-pr-<pr_number>-<agent_type>`), set up the autorun directory, and create a Maestro agent with the "no changes" nudge
-3. Copies Code Review playbooks into `~/wizard/worktrees/autorun/<repo>/<worktree>/development/code-review/`
+3. Copies Code Review playbooks into `~/wizard/worktrees/autorun/<repo>/<worktree>/development/code-review/` (see [Code Review playbook source](#code-review-playbook-source))
 4. Patches the correct PR URL into `1_ANALYZE_CHANGES.md`
 5. Checks out the PR branch in the worktree via `gh pr checkout`
 6. Triggers the auto-run sequence against the playbooks (skipped with `--no-run`)
 
 The agent is always nudged with: _"Do not make any changes this is only a review task."_
 Worktree cleanup is left to the user after the review is complete.
+
+#### Code Review playbook source
+
+The playbooks are sourced in two ways, in order:
+
+1. **Local checkout** — if `*.md` files exist under
+   `~/src/Maestro-Playbooks/Development/Code-Review`, they are copied from there.
+2. **GitHub fallback** — otherwise the script fetches them via `gh api` from
+   [`RunMaestro/Maestro-Playbooks`](https://github.com/RunMaestro/Maestro-Playbooks/tree/main/Development/Code-Review)
+   (the `main` branch). This uses your authenticated `gh`, so it also works for
+   private access.
+
+Either way, `README.md` is dropped and the PR URL is patched into
+`1_ANALYZE_CHANGES.md`.
 
 ### `maestro_wt.sh` — Named Worktree + Maestro Agent
 
@@ -143,3 +195,52 @@ Looks up a Maestro agent's UUID by its exact name. Useful for scripting or when 
 **What it does:**
 
 Parses the output of `maestro_dev_cli list agents` and prints the UUID of the named agent to stdout. Exits non-zero if no agent matches or if multiple agents share the same name (prints a warning with all matching UUIDs in that case).
+
+### `maestro_watch.sh` — Auto Run Completion Watcher
+
+Watches a Maestro Auto Run agent and prints a running log until the run is
+**fully** done, then fires a desktop toast notification.
+
+This exists because `maestro_dev_cli session list` / `show agent` report the
+agent as *idle* during an Auto Run: each iteration runs as a detached headless
+`claude --print` process rather than a tracked desktop session. The watcher
+follows that process by agent ID instead. Since Auto Run exits after every task
+and relaunches for the next one, "fully done" is only declared once the process
+has stayed gone for the full grace window with no new iteration spawning.
+
+**Usage:**
+
+```zsh
+./maestro_watch.sh <agent_id> [grace_seconds] [poll_seconds]
+```
+
+**Arguments:**
+
+| Argument | Description |
+| --- | --- |
+| `agent_id` | The UUID of the Maestro agent to watch (e.g. from [`maestro_id.sh`](#maestro_idsh--agent-uuid-lookup)) |
+| `grace_seconds` | How long the process must stay gone before declaring "done". Default: `60` |
+| `poll_seconds` | Polling interval. Default: `5` |
+
+**Options:**
+
+| Flag | Description |
+| --- | --- |
+| `-h, --help` | Show help and exit |
+
+**Examples:**
+
+```zsh
+./maestro_watch.sh 14fcd1d2-19ee-482b-8e4a-b521aca9a7e6
+./maestro_watch.sh 14fcd1d2-19ee-482b-8e4a-b521aca9a7e6 120 10
+./maestro_watch.sh "$(./maestro_id.sh wizard-pr-345-claude-code)"
+```
+
+**What it does:**
+
+1. Resolves the Maestro CLI and data dir via [`_maestro_env.sh`](#maestro-cli-resolution); because it reads the agent history file directly off disk, it defaults `MAESTRO_USER_DATA` to the installed app's location when the helper leaves it unset
+2. Polls every `poll_seconds` for the agent's `claude --print` process, logging each new iteration as it spawns
+3. When the process disappears, opens a grace window of `grace_seconds`, watching for the next iteration to respawn
+4. Once the grace window elapses with no respawn, declares the run done, reports the iteration count and number of completed tasks, and fires a `notify toast`
+
+The watcher runs until the agent is fully done (or you interrupt it with `Ctrl-C`).

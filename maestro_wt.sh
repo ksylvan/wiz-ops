@@ -54,6 +54,12 @@ die() {
     exit 1
 }
 
+# ---------- resolve Maestro CLI ----------
+
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_maestro_env.sh
+source "${_script_dir}/_maestro_env.sh" || die "Cannot source _maestro_env.sh"
+
 # ---------- argument parsing ----------
 
 if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
@@ -170,8 +176,6 @@ echo "  Autorun  : ${autorun_dir}"
 
 # --------- create Maestro agent ----------
 
-export MAESTRO_USER_DATA="$HOME/Library/Application Support/maestro-dev"
-maestro_cli="$HOME/src/worktrees/Maestro/preview/dist/cli/maestro-cli.js"
 agent_name="${repo}-${wt_name}-${agent_type}"
 
 if [[ -n "$json_out" ]]; then

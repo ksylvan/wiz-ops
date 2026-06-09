@@ -30,6 +30,12 @@ die() {
     exit 1
 }
 
+# ---------- resolve Maestro CLI ----------
+
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_maestro_env.sh
+source "${_script_dir}/_maestro_env.sh" || die "Cannot source _maestro_env.sh"
+
 # ---------- argument parsing ----------
 
 if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
@@ -46,9 +52,6 @@ fi
 agent_name="$1"
 
 # ---------- look up agent ----------
-
-export MAESTRO_USER_DATA="$HOME/Library/Application Support/maestro-dev"
-maestro_cli="$HOME/src/worktrees/Maestro/preview/dist/cli/maestro-cli.js"
 
 # 'list agents' output format (3 lines per agent):
 #   <name> <type> [Auto Run]

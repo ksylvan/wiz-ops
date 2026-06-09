@@ -12,8 +12,19 @@ VALID_REPOS=(wizard wizard-ai wizard-core wizard-release wizard-spec)
 VALID_AGENT_TYPES=(claude-code codex opencode)
 PLAYBOOKS_SOURCE="${HOME}/src/Maestro-Playbooks/Development/Code-Review"
 
+# GitHub fallback for the Code Review playbooks, used when PLAYBOOKS_SOURCE is
+# not checked out locally. Mirrors:
+#   https://github.com/RunMaestro/Maestro-Playbooks/tree/main/Development/Code-Review
+PLAYBOOKS_GH_REPO="RunMaestro/Maestro-Playbooks"
+PLAYBOOKS_GH_REF="main"
+PLAYBOOKS_GH_PATH="Development/Code-Review"
+
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 MAESTRO_WT="${script_dir}/maestro_wt.sh"
+
+# Resolve maestro_cli (and MAESTRO_USER_DATA when appropriate); sources .env.
+# shellcheck source=_maestro_env.sh
+source "${script_dir}/_maestro_env.sh"
 
 format_options() {
     local formatted=""
@@ -58,6 +69,28 @@ EOF
 die() {
     echo "Error: $*" >&2
     exit 1
+}
+
+# Download all Code Review playbook *.md files from GitHub into $1.
+# Used when the local PLAYBOOKS_SOURCE checkout is unavailable.
+fetch_playbooks_from_github() {
+    local dest="$1"
+    local listing name url
+
+    echo "Local playbooks not found; fetching from github.com/${PLAYBOOKS_GH_REPO} (${PLAYBOOKS_GH_PATH})..." >&2
+
+    # List directory contents via the GitHub API: "<name>\t<download_url>" per .md file.
+    listing=$(gh api "repos/${PLAYBOOKS_GH_REPO}/contents/${PLAYBOOKS_GH_PATH}?ref=${PLAYBOOKS_GH_REF}" \
+        --jq '.[] | select(.type == "file" and (.name | endswith(".md"))) | "\(.name)\t\(.download_url)"' 2>&1) \
+        || die "Failed to list playbooks from GitHub:\n${listing}"
+
+    [[ -n "$listing" ]] || die "No playbook .md files found at ${PLAYBOOKS_GH_REPO}/${PLAYBOOKS_GH_PATH}"
+
+    while IFS=$'\t' read -r name url; do
+        [[ -n "$name" && -n "$url" ]] || continue
+        gh api "$url" > "${dest}/${name}" \
+            || die "Failed to download playbook '${name}' from GitHub"
+    done <<< "$listing"
 }
 
 # ---------- argument parsing ----------
@@ -173,10 +206,20 @@ agent_id=$(jq -r .agentId "${agent_json}") \
 
 playbook_dest="${autorun_dir}/development/code-review"
 
-printf "\n%s" "Setting up Code Review playbooks in ${playbook_dest}..."
+printf "\n%s\n" "Setting up Code Review playbooks in ${playbook_dest}..."
 mkdir -p "${playbook_dest}" || die "Cannot create ${playbook_dest}"
-cp "${PLAYBOOKS_SOURCE}/"*.md "${playbook_dest}/" || die "Failed to copy playbooks"
+
+# Prefer the local checkout; fall back to fetching the playbooks from GitHub.
+if compgen -G "${PLAYBOOKS_SOURCE}/"'*.md' > /dev/null; then
+    cp "${PLAYBOOKS_SOURCE}/"*.md "${playbook_dest}/" || die "Failed to copy playbooks"
+else
+    fetch_playbooks_from_github "${playbook_dest}"
+fi
+
 rm -f "${playbook_dest}/README.md"
+
+[[ -f "${playbook_dest}/1_ANALYZE_CHANGES.md" ]] \
+    || die "Playbooks missing 1_ANALYZE_CHANGES.md after setup"
 
 # Substitute the placeholder PR URL in the analyze-changes document
 perl -pi -e \
@@ -199,9 +242,6 @@ echo "  Playbooks: ${playbook_dest}"
 echo "  Agent ID : ${agent_id}"
 
 # --------- Trigger the auto-run ----------
-
-export MAESTRO_USER_DATA="$HOME/Library/Application Support/maestro-dev"
-maestro_cli="$HOME/src/worktrees/Maestro/preview/dist/cli/maestro-cli.js"
 
 if [[ "$no_run" == "true" ]]; then
     printf "\n%s\n" "--no-run specified: skipping auto-run launch."
