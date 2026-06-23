@@ -6,6 +6,8 @@ Operational scripts and tooling for the [story-wizard](https://github.com/story-
 
 This repo collects convenience scripts that support day-to-day development workflows across the Wizard ecosystem — starting with PR review automation.
 
+The lower-level `maestro_*` scripts set up isolated worktrees and Maestro agents on demand. The `wiz_pr_*` scripts build a fully automated, Slack-triggered PR-review pipeline on top of them (see [Slack-triggered PR review pipeline](#slack-triggered-pr-review-pipeline)).
+
 ## Requirements
 
 - [`gh`](https://cli.github.com/) — GitHub CLI, authenticated
@@ -14,6 +16,13 @@ This repo collects convenience scripts that support day-to-day development workf
 - The [Maestro](https://github.com/ksylvan/Maestro) CLI — either the installed app at `/Applications/Maestro.app` or a local `preview` worktree (see [Maestro CLI resolution](#maestro-cli-resolution) below)
 - Code Review playbooks — preferably checked out locally at `~/src/Maestro-Playbooks/Development/Code-Review`, otherwise fetched from GitHub automatically (see [Code Review playbook source](#code-review-playbook-source) below)
 - The `~/wizard/<repo>` checkouts that worktrees are derived from (worktrees land in `~/wizard/worktrees/<repo>/`)
+
+For the [Slack-triggered PR review pipeline](#slack-triggered-pr-review-pipeline) only, you additionally need:
+
+- [`curl`](https://curl.se/) — used by the Slack helpers
+- A Slack bot token in `~/.hermes/.env` as `SLACK_BOT_TOKEN` (the bot must be a member of the monitored/output channel and have `chat:write` + `files:write` scopes)
+- The [Hermes](https://github.com/ksylvan/hermes) gateway, configured to monitor the trigger channel and dispatch to the `wiz-pr-review-pipeline` skill (wired up automatically by [`wiz_pr_mode.sh`](#wiz_pr_modesh--switch-pipeline-between-test-and-prod))
+- `gh` authenticated with the `project` scope (for setting PR project Status)
 
 The git worktree helpers are bundled in [`_worktree_helpers.sh`](./_worktree_helpers.sh) and sourced by the scripts directly, so no shell-dotfile setup (e.g. `~/.zshrc.d/`) is required.
 
@@ -265,3 +274,179 @@ has stayed gone for the full grace window with no new iteration spawning.
 4. Once the grace window elapses with no respawn, declares the run done, reports the iteration count and number of completed tasks, and fires a `notify toast`
 
 The watcher runs until the agent is fully done (or you interrupt it with `Ctrl-C`).
+
+## Slack-triggered PR review pipeline
+
+The `wiz_pr_*` scripts turn a GitHub PR link dropped into a Slack channel into a
+fully automated Maestro code review, with all status updates and artifacts
+posted back to the same Slack thread.
+
+### Architecture
+
+A [Hermes](https://github.com/ksylvan/hermes) gateway monitors a single Slack
+channel. When a message contains a PR link of the form
+`https://github.com/story-wizard/<repo>/pull/<number>`, the gateway loads the
+`wiz-pr-review-pipeline` skill, which extracts the repo + PR number and invokes
+[`wiz_pr_review.sh`](#wiz_pr_reviewsh--slack-pipeline-driver). From there the
+scripts drive everything:
+
+```
+Slack PR link
+   └─ Hermes gateway (wiz-pr-review-pipeline skill)
+        └─ wiz_pr_review.sh
+             ├─ maestro_pr.sh ............ worktree + agent + autorun
+             ├─ wiz_pr_set_status.sh ..... Status -> "AI Review 1"
+             ├─ posts threaded start-ack to Slack
+             └─ wiz_pr_watch_finalize.sh (detached)
+                  ├─ maestro_watch.sh ..... wait for the review to finish
+                  ├─ uploads review artifacts to the thread
+                  ├─ sends the finalize prompt to the agent
+                  └─ posts the final confirmation (@-mentions the poster)
+```
+
+**The scripts post all Slack output themselves.** Because the monitored
+(trigger) channel and the output channel are always the *same* channel, output
+can never leak elsewhere — so the gateway agent itself just replies `NO_REPLY`.
+
+### Test vs. prod, in one switch
+
+The pipeline runs in one of two modes, controlled entirely by
+[`wiz_pr_mode.sh`](#wiz_pr_modesh--switch-pipeline-between-test-and-prod):
+
+| Mode | Monitored + output channel |
+| --- | --- |
+| `test` | `#wiz-bot` (home/ops) — `C0BCCTG5F0R` |
+| `prod` | `#wiz-pull-requests` — `C0APAGTP97F` |
+
+### `wiz_pr_pipeline.env` — shared config
+
+Sourced by the pipeline scripts. **Not secret** (no tokens — the Slack bot token
+is read from `~/.hermes/.env` at runtime). The mode/channel block at the top is
+managed by `wiz_pr_mode.sh` and should not be hand-edited. Notable settings:
+
+| Variable | Description |
+| --- | --- |
+| `WIZ_ACTIVE_CHANNEL` | The single channel the pipeline both monitors and posts to (managed by `wiz_pr_mode.sh`) |
+| `WIZ_TEST_MODE` | `true` in test mode, `false` in prod (managed by `wiz_pr_mode.sh`) |
+| `WIZ_HOME_CHANNEL` / `WIZ_PR_CHANNEL` | Stable channel IDs for `#wiz-bot` and `#wiz-pull-requests` |
+| `WIZ_DEFAULT_AGENT_TYPE` | Maestro agent type when the Slack message doesn't specify one (default `claude-code`) |
+| `WIZ_REVIEW_FILES` | Review artifacts uploaded to the thread when a review finishes |
+| `WIZ_FINALIZE_PROMPT` | Path to the finalize prompt sent to the agent after the review completes |
+| `WIZ_WATCH_GRACE` / `WIZ_WATCH_POLL` | `maestro_watch.sh` grace + poll seconds |
+
+### `_wiz_slack.sh` — shared Slack helpers
+
+Sourced (never executed) by the pipeline scripts. Reads `SLACK_BOT_TOKEN` from
+`~/.hermes/.env` and exposes helpers for posting and uploading to Slack:
+
+| Function | Description |
+| --- | --- |
+| `wiz_slack_ready` | True if a bot token is available |
+| `wiz_slack_post <channel> <thread_ts\|""> <text>` | Post a (optionally threaded) message; echoes the message `ts` |
+| `wiz_slack_upload <channel> <thread_ts\|""> <intro> <file...>` | Upload one or more files to the thread with an intro comment |
+| `wiz_slack_thread_author <channel> <thread_ts>` | Echo the user id of the thread-parent author (used to @-mention the original poster) |
+
+### `wiz_pr_mode.sh` — switch pipeline between test and prod
+
+A single switch that keeps the scripts' output channel and the gateway's
+monitored channel in lockstep, so output can never land in the wrong place.
+
+**Usage:**
+
+```zsh
+./wiz_pr_mode.sh [test|prod|status]
+```
+
+| Argument | Description |
+| --- | --- |
+| `test` | Monitor + post to `#wiz-bot` (home/ops) |
+| `prod` | Monitor + post to `#wiz-pull-requests` (the PR channel) |
+| `status` | Print the current mode + monitored channel (default if no argument) |
+
+**What it does:**
+
+1. Updates `wiz_pr_pipeline.env` (`WIZ_TEST_MODE` + `WIZ_ACTIVE_CHANNEL`) — the channel the scripts post to
+2. Updates the Hermes gateway config — `slack.free_response_channels`, the channel prompt, and `channel_skill_bindings` — to monitor the active channel and dispatch to the `wiz-pr-review-pipeline` skill, pruning the inactive channel's prompt/binding so a previous mode can't linger
+
+> **After switching you must restart the gateway** from a shell *outside* the
+> gateway process for the monitored-channel change to take effect:
+>
+> ```zsh
+> hermes gateway restart
+> ```
+
+### `wiz_pr_review.sh` — Slack pipeline driver
+
+The entry point invoked by the gateway skill once it has extracted the repo + PR
+number from a PR link. Sets up the review, posts a start-ack, and launches the
+detached watcher.
+
+**Usage:**
+
+```zsh
+./wiz_pr_review.sh <repo> <pr_number> [agent_type] [thread_ts]
+```
+
+| Argument | Description |
+| --- | --- |
+| `repo` | One of: `wizard`, `wizard-ai`, `wizard-core`, `wizard-release`, `wizard-spec` |
+| `pr_number` | The PR number (numeric) |
+| `agent_type` | Optional agent type. Defaults to `WIZ_DEFAULT_AGENT_TYPE` (`claude-code`) |
+| `thread_ts` | Optional Slack thread timestamp to post all output under |
+
+**What it does:**
+
+1. Looks up the PR title + URL via `gh` (also validating it exists)
+2. Runs [`maestro_pr.sh`](#maestro_prsh--pr-review-setup) to create the worktree, Maestro agent, and autorun
+3. On success: sets the project Status to **"AI Review 1"** via [`wiz_pr_set_status.sh`](#wiz_pr_set_statussh--set-pr-project-status), posts a threaded start-ack, and launches [`wiz_pr_watch_finalize.sh`](#wiz_pr_watch_finalizesh--watch-and-finalize) detached
+4. On failure: posts a failure report (with the stage + tail of the log) to the channel
+
+It always prints a one-line JSON summary to stdout (for logs / the agent),
+whether it succeeds or fails.
+
+### `wiz_pr_set_status.sh` — set PR project Status
+
+Sets a PR's **Status** on the org "Wizard Development" project (org
+`story-wizard`, project #1) to a named single-select option. Used by the
+pipeline to mark a PR as "AI Review 1", but usable standalone.
+
+**Usage:**
+
+```zsh
+./wiz_pr_set_status.sh <repo> <pr_number> "<status_name>"
+```
+
+| Argument | Description |
+| --- | --- |
+| `repo` | One of: `wizard`, `wizard-ai`, `wizard-core`, `wizard-release`, `wizard-spec` |
+| `pr_number` | The PR number (numeric) |
+| `status_name` | Exact Status option name, e.g. `"AI Review 1"` |
+
+**What it does:**
+
+1. Resolves the project id, Status field id, and target option id live via the GitHub GraphQL API (an invalid status name prints the valid options)
+2. Finds the PR's existing project item (PRs in `story-wizard` are auto-added to project #1); adds it to the board first if it isn't there yet
+3. Patches the item's Status single-select value
+
+Requires `gh` authenticated with the `project` scope.
+
+### `wiz_pr_watch_finalize.sh` — watch and finalize
+
+Launched **detached** by `wiz_pr_review.sh` (it blocks for minutes). Waits for
+the Maestro review to finish, then posts the artifacts and finalizes.
+
+**Usage:**
+
+```zsh
+./wiz_pr_watch_finalize.sh <repo> <pr_number> <agent_id> <autorun_dir> <pr_title> <pr_url> <thread_ts>
+```
+
+**What it does:**
+
+1. Watches the agent with [`maestro_watch.sh`](#maestro_watchsh--auto-run-completion-watcher) until the Auto Run is fully idle
+2. Collects the `WIZ_REVIEW_FILES` artifacts from the autorun dir and uploads them to the thread (noting any missing ones; falls back to a text-only notice if none are present)
+3. Sends the `WIZ_FINALIZE_PROMPT` to the Maestro agent (which creates the GitHub PR review), best-effort extracting the resulting review URL from the agent's response
+4. Posts a final confirmation to the thread, @-mentioning the original poster
+
+Its own progress log goes to `~/wizard/tmp/wiz-pr-logs/<worktree>-<timestamp>.log`
+(the path is reported in `wiz_pr_review.sh`'s JSON summary as `watcher_log`).
