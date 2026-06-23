@@ -47,7 +47,7 @@ while [[ $# -gt 0 ]]; do
         *)         args+=("$1"); shift ;;
     esac
 done
-set -- "${args[@]}"
+set -- "${args[@]+"${args[@]}"}"
 
 # ---- resolve the autorun dir ----
 if [[ -z "$autorun_dir" ]]; then
@@ -77,8 +77,8 @@ declare -a P_TITLE P_DONE P_TOTAL P_STATE
 for f in "${phase_files[@]}"; do
     title="$(sed -n '1s/^#\{1,\} *//p' "$f")"
     [[ -z "$title" ]] && title="$(basename "$f" .md)"
-    done_n="$(grep -cE '^[[:space:]]*-[[:space:]]*\[[xX]\]' "$f" 2>/dev/null || echo 0)"
-    open_n="$(grep -cE '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' "$f" 2>/dev/null || echo 0)"
+    done_n="$(grep -cE '^[[:space:]]*-[[:space:]]*\[[xX]\]' "$f" 2>/dev/null)"; done_n="${done_n//[^0-9]/}"; done_n="${done_n:-0}"
+    open_n="$(grep -cE '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' "$f" 2>/dev/null)"; open_n="${open_n//[^0-9]/}"; open_n="${open_n:-0}"
     all_n=$(( done_n + open_n ))
 
     if   [[ $all_n -eq 0 ]];           then state="no-tasks"
