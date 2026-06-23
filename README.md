@@ -304,6 +304,25 @@ Slack PR link
                   └─ posts the final confirmation (@-mentions the poster)
 ```
 
+A **re-review** (the author pushed changes and asks for another pass in the
+thread) follows a parallel path:
+
+```
+Slack thread reply: "re-review this"  (no PR link)
+   └─ Hermes gateway (wiz-pr-review-pipeline skill)
+        │  recovers repo+PR from session history / thread-state file
+        └─ wiz_pr_rereview.sh
+             ├─ git pull --ff-only in the review worktree
+             ├─ no new commits? -> post "no changes, ask again" and stop
+             └─ new commits:
+                  ├─ archive prior artifacts -> <autorun>/review_<N>/
+                  ├─ uncheck all code-review playbook checkboxes
+                  ├─ relaunch the Maestro auto-run
+                  ├─ wiz_pr_set_status.sh .... Status -> "AI Review 2" (capped)
+                  ├─ posts threaded "AI review #N started" ack
+                  └─ wiz_pr_watch_finalize.sh (detached, reused as-is)
+```
+
 **The scripts post all Slack output themselves.** Because the monitored
 (trigger) channel and the output channel are always the *same* channel, output
 can never leak elsewhere — so the gateway agent itself just replies `NO_REPLY`.
@@ -333,6 +352,7 @@ managed by `wiz_pr_mode.sh` and should not be hand-edited. Notable settings:
 | `WIZ_REVIEW_FILES` | Review artifacts uploaded to the thread when a review finishes |
 | `WIZ_FINALIZE_PROMPT` | Path to the finalize prompt sent to the agent after the review completes |
 | `WIZ_WATCH_GRACE` / `WIZ_WATCH_POLL` | `maestro_watch.sh` grace + poll seconds |
+| `WIZ_PR_STATE_DIR` | Directory of `thread_ts → {repo,pr,agent}` state records, written on review 1 and read back by `wiz_pr_rereview.sh` so a re-review reply (no PR link) can recover its PR |
 
 ### `_wiz_slack.sh` — shared Slack helpers
 
@@ -403,6 +423,56 @@ detached watcher.
 
 It always prints a one-line JSON summary to stdout (for logs / the agent),
 whether it succeeds or fails.
+
+### `wiz_pr_rereview.sh` — re-run a review after the author pushes changes
+
+Invoked by the gateway skill when someone replies in an existing PR-review
+thread asking for another review (e.g. "re-review this"). Pulls the branch and,
+if there are new commits, re-runs the whole Maestro review in the **same**
+worktree/agent, threading all output under the original review thread.
+
+**Usage:**
+
+```zsh
+./wiz_pr_rereview.sh <repo> <pr_number> [agent_type] [thread_ts]
+```
+
+Same argument shape as [`wiz_pr_review.sh`](#wiz_pr_reviewsh--slack-pipeline-driver).
+The skill recovers `repo`/`pr_number`/`agent_type` for the thread from the
+session history or the `WIZ_PR_STATE_DIR` state file (a re-review reply carries
+no PR link of its own).
+
+**What it does:**
+
+1. Locates the existing review worktree, autorun dir, and Maestro agent using
+   the same deterministic `<repo>-pr-<pr_number>-<agent_type>` naming review 1
+   used (fails clearly if no prior review exists for that PR/agent)
+2. `git pull --ff-only` in the worktree — if the author force-pushed/rebased
+   (non-fast-forward), it fetches and hard-resets the review branch to its
+   upstream (the PR head) so the worktree always matches the latest PR state
+3. **If HEAD is unchanged** (no new commits): posts _"There are no changes in
+   the branch. Please make your changes and ask again."_ to the thread and exits
+   (`action:"no_changes"`). Nothing else happens — no archive, no relaunch.
+4. **If there are new commits:**
+   - Archives the previous round's artifacts (`WIZ_REVIEW_FILES` + `PR_COMMENT.md`)
+     into `<autorun_dir>/review_<N>/`, where `N` is the round being archived
+     (first re-review → `review_1`, next → `review_2`, …)
+   - Unchecks every checkbox (`- [x]` → `- [ ]`) in the
+     `development/code-review/*.md` playbooks so the auto-run reruns every task
+   - Relaunches the Maestro auto-run against the playbooks
+   - Sets project Status to **"AI Review 2"** (the board only has rounds 1 and
+     2, so this is capped; for a 3rd+ review the real round number is stated in
+     the Slack ack instead)
+   - Posts a threaded "AI review #N started" ack noting the SHA change and the
+     archive location
+   - Launches [`wiz_pr_watch_finalize.sh`](#wiz_pr_watch_finalizesh--watch-and-finalize)
+     detached — the **same** watcher review 1 uses, so the new artifacts are
+     uploaded, the finalize prompt is sent, and the poster is @-mentioned when
+     the rerun completes
+
+Its watcher log lands in `~/wizard/tmp/wiz-pr-logs/<worktree>-rereviewN-<ts>.log`.
+Like the other pipeline scripts, it posts all Slack output itself and prints one
+JSON summary line to stdout.
 
 ### `wiz_pr_set_status.sh` — set PR project Status
 

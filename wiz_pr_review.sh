@@ -69,6 +69,25 @@ agent_id="$(grep -E 'Agent ID' "$run_log" | tail -1 | sed -E 's/.*Agent ID[[:spa
 [[ -n "$agent_id" ]] || agent_id="$("${script_dir}/maestro_id.sh" "$worktree_name" 2>/dev/null | tr -d '[:space:]')"
 [[ -n "$agent_id" ]] || post_fail "agent_id" "could not determine Maestro agent id (worktree ${worktree_name})"
 
+# ---- persist thread -> PR state so a later "re-review" reply can recover it ----
+# A re-review request arrives as a threaded reply with NO PR link, so it cannot
+# re-parse repo/pr from its own text. We key a small JSON record by the Slack
+# thread (the triggering message's ts, which becomes the thread parent for all
+# pipeline posts). wiz_pr_rereview.sh reads it back. Best-effort: never fail the
+# review if the state write doesn't work.
+if [[ -n "${thread_ts:-}" ]]; then
+    state_dir="${WIZ_PR_STATE_DIR:-${HOME}/wizard/tmp/wiz-pr-state}"
+    mkdir -p "$state_dir" 2>/dev/null \
+        && jq -nc \
+            --arg repo "$repo" --arg pr "$pr_number" --arg agent "$agent_type" \
+            --arg wt "$worktree_name" --arg autorun "$autorun_dir" \
+            --arg agent_id "$agent_id" --arg thread "$thread_ts" \
+            '{repo:$repo, pr_number:$pr, agent_type:$agent, worktree_name:$wt,
+              autorun_dir:$autorun, agent_id:$agent_id, thread_ts:$thread}' \
+            > "${state_dir}/${thread_ts}.json" 2>/dev/null \
+        || true
+fi
+
 # ---- 2. set project status to "AI Review 1" ----
 status_set=true
 status_msg=""
