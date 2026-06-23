@@ -27,9 +27,24 @@ source "${script_dir}/_wiz_slack.sh" || { echo '{"ok":false,"stage":"config","me
 
 dest_channel="${WIZ_ACTIVE_CHANNEL}"
 
+# React on the triggering message: helper guards on empty thread_ts/token.
+react_set() {
+    # react_set <emoji_name> — add a reaction to the trigger message (best-effort)
+    [[ -n "${thread_ts:-}" ]] && wiz_slack_ready \
+        && wiz_slack_react "$dest_channel" "$thread_ts" "$1" >/dev/null 2>&1 || true
+}
+react_swap() {
+    # react_swap <from_emoji> <to_emoji>
+    [[ -n "${thread_ts:-}" ]] && wiz_slack_ready || return 0
+    wiz_slack_unreact "$dest_channel" "$thread_ts" "$1" >/dev/null 2>&1 || true
+    wiz_slack_react   "$dest_channel" "$thread_ts" "$2" >/dev/null 2>&1 || true
+}
+
 post_fail() {
     # post_fail <stage> <message> — report to active channel + emit JSON, exit 1
     local stage="$1" msg="$2" text
+    # Swap the in-progress reaction (if any) to the failed marker.
+    react_swap "${WIZ_REACT_INPROGRESS}" "${WIZ_REACT_FAILED}"
     text="❌ *PR review setup failed* for \`story-wizard/${repo:-?}\` PR #${pr_number:-?} at stage *${stage}*."$'\n'"\`\`\`"$'\n'"${msg}"$'\n'"\`\`\`"
     if wiz_slack_ready; then
         wiz_slack_post "$dest_channel" "${thread_ts:-}" "$text" >/dev/null || true
@@ -87,6 +102,9 @@ if [[ -n "${thread_ts:-}" ]]; then
             > "${state_dir}/${thread_ts}.json" 2>/dev/null \
         || true
 fi
+
+# ---- in-progress reaction on the trigger message ----
+react_set "${WIZ_REACT_INPROGRESS}"
 
 # ---- 2. set project status to "AI Review 1" ----
 status_set=true

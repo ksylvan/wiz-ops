@@ -69,7 +69,17 @@ done < "$ENV_FILE" > "$tmp"
 mv "$tmp" "$ENV_FILE"
 
 # ---- 2. update the gateway monitored channel ----
-prompt="This is the Wizard PR-review trigger channel. You ONLY act when a message contains a GitHub pull-request link of the form https://github.com/story-wizard/<repo>/pull/<number> (repo is one of wizard, wizard-ai, wizard-core, wizard-release, wizard-spec). When such a link is present, load and follow the ${SKILL_NAME} skill to kick off the Maestro code review. If a message contains NO such PR link, reply with exactly NO_REPLY and nothing else."
+read -r -d '' prompt <<EOF || true
+This is the Wizard PR-review trigger channel, shared by the whole team. Messages are prefixed with the sender name in brackets, e.g. [kayvan] or [aryan].
+
+AUTHORIZATION (enforce strictly):
+- If the message is from [kayvan]: you may act normally (run the pipeline on a PR link, or respond to a direct request).
+- If the message is from ANYONE ELSE: you may ONLY start a PR review. You must NOT answer questions, hold conversations, run commands, or take any other action for non-Kayvan users. If their message does not contain a GitHub PR link, reply with exactly NO_REPLY.
+
+PIPELINE TRIGGER: A message qualifies only if it contains a GitHub pull-request link of the form https://github.com/story-wizard/<repo>/pull/<number> (repo one of wizard, wizard-ai, wizard-core, wizard-release, wizard-spec). When a qualifying link is present (from anyone), load and follow the ${SKILL_NAME} skill to kick off the Maestro code review, then reply with exactly NO_REPLY (the skill's scripts post all Slack output themselves).
+
+In ALL cases, after doing the work (or if no action is warranted), your final reply must be exactly NO_REPLY so nothing from you appears in the channel.
+EOF
 
 "$HERMES" config set slack.free_response_channels "$active_ch" >/dev/null \
     || die "failed to set slack.free_response_channels"

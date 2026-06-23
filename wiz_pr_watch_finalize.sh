@@ -82,11 +82,20 @@ fi
 # ---- 4. final confirmation, @-mentioning the original poster ----
 mention=""
 author_id="$(wiz_slack_thread_author "$dest_channel" "$dest_thread" 2>/dev/null)"
-[[ -n "$author_id" ]] && mention="<@${author_id}> "
+# Skip the mention if the parent was deleted (author resolves to Slackbot) or unknown.
+if [[ -n "$author_id" && "$author_id" != "USLACKBOT" ]]; then
+    mention="<@${author_id}> "
+fi
 confirm="✅ ${mention}The code review for *${pr_title}* (<${pr_url}>) has been posted."
 [[ -n "$review_url" ]] && confirm+=$'\n'"Review: <${review_url}>"
 wiz_slack_post "$dest_channel" "$dest_thread" "$confirm" >/dev/null \
     && log "Posted final confirmation${author_id:+ (mentioned ${author_id})}" \
     || log "WARNING: failed to post final confirmation"
+
+# ---- 5. swap the in-progress reaction to done on the trigger message ----
+if [[ -n "$dest_thread" ]] && wiz_slack_ready; then
+    wiz_slack_unreact "$dest_channel" "$dest_thread" "${WIZ_REACT_INPROGRESS}" >/dev/null 2>&1 || true
+    wiz_slack_react   "$dest_channel" "$dest_thread" "${WIZ_REACT_DONE}"       >/dev/null 2>&1 || true
+fi
 
 log "Pipeline finalize done for ${repo} PR #${pr_number}."

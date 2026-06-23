@@ -71,3 +71,23 @@ wiz_slack_thread_author() {
         --data-urlencode "limit=1" \
         | jq -r '.messages[0].user // empty'
 }
+
+wiz_slack_react() {
+    # wiz_slack_react <channel> <ts> <emoji_name>   (no colons)
+    local ch="$1" ts="$2" name="$3"
+    [[ -n "$ch" && -n "$ts" && -n "$name" ]] || return 1
+    _wiz_slack_api reactions.add -H "Content-type: application/json; charset=utf-8" \
+        --data "$(jq -nc --arg ch "$ch" --arg ts "$ts" --arg n "$name" \
+            '{channel:$ch, timestamp:$ts, name:$n}')" \
+        | jq -e '.ok == true or .error == "already_reacted"' >/dev/null
+}
+
+wiz_slack_unreact() {
+    # wiz_slack_unreact <channel> <ts> <emoji_name>
+    local ch="$1" ts="$2" name="$3"
+    [[ -n "$ch" && -n "$ts" && -n "$name" ]] || return 1
+    _wiz_slack_api reactions.remove -H "Content-type: application/json; charset=utf-8" \
+        --data "$(jq -nc --arg ch "$ch" --arg ts "$ts" --arg n "$name" \
+            '{channel:$ch, timestamp:$ts, name:$n}')" \
+        | jq -e '.ok == true or .error == "no_reaction"' >/dev/null
+}
