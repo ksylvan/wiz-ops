@@ -47,6 +47,7 @@ Options:
                     Mutually exclusive with --nudge / --json-out.
   --force           Only with --delete: skip the confirmation prompt and force
                     removal of the worktree even if it has uncommitted changes.
+                    Also removes the autorun directory without prompting.
 
 Examples:
   $(basename "$0") wizard-core my-feature
@@ -239,7 +240,8 @@ if [[ "$delete_mode" == "true" ]]; then
     cd "${HOME}/wizard/${repo}" || die "Cannot cd to ${HOME}/wizard/${repo}"
 
     # cleanup_work_tree_here removes the worktree and prompts about the autorun dir.
-    # --force is passed through to `git worktree remove` for dirty worktrees.
+    # --force is passed through to `git worktree remove` for dirty worktrees and
+    # also skips the autorun-dir prompt, deleting it outright.
     if [[ "$force" == "true" ]]; then
         cleanup_work_tree_here "${worktree_name}" --force \
             || echo "Warning: worktree cleanup did not complete; continuing to agent removal." >&2

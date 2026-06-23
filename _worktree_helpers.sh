@@ -101,7 +101,7 @@ make_autorun_dirs() {
 }
 
 # Remove a git worktree (and optionally its autorun directory).
-# Prompts before removing the autorun directory.
+# Prompts before removing the autorun directory, unless --force is given.
 cleanup_work_tree_here() {
     if [[ $# -lt 1 || $# -gt 2 ]]; then
         echo "Usage: cleanup_work_tree_here <worktree-name> [--force]" >&2
@@ -157,12 +157,14 @@ cleanup_work_tree_here() {
 
     local autorun_dir="${worktree_path/worktrees\//worktrees/autorun/}"
     if [[ -d "$autorun_dir" ]]; then
-        echo -n "Should we remove autorun directory: $autorun_dir? (y/n) [n] "
-        local answer
-        read -r answer
-        if [[ "$answer" != "y" ]]; then
-            echo "Skipping removal of autorun directory."
-            return 0
+        if [[ "$force_remove" != "--force" ]]; then
+            echo -n "Should we remove autorun directory: $autorun_dir? (y/n) [n] "
+            local answer
+            read -r answer
+            if [[ "$answer" != "y" ]]; then
+                echo "Skipping removal of autorun directory."
+                return 0
+            fi
         fi
         rm -rf "$autorun_dir"
         echo "Removed autorun directory: $autorun_dir"
