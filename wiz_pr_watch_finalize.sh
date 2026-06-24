@@ -62,6 +62,47 @@ else
     wiz_slack_post "$dest_channel" "$dest_thread" "${intro}"$'\n'"(no review artifacts found to attach)" >/dev/null
 fi
 
+# ---- 2b. attach the review artifacts to the PR as a GitHub comment ----
+# Single comment with each artifact in a collapsible <details> block so the PR
+# conversation stays readable. GitHub caps a comment at 65536 chars, so each
+# artifact is truncated to a safe budget with a pointer to the Slack thread for
+# the full text. Best-effort: never fail the pipeline on a gh hiccup.
+if [[ ${#present[@]} -gt 0 ]] && command -v gh >/dev/null 2>&1; then
+    gh_body_file="$(mktemp -t wiz_pr_ghcomment.XXXXXX)"
+    # Per-artifact char budget keeps the whole comment well under GitHub's 65536
+    # limit even with 5 artifacts + the <details> wrappers.
+    per_artifact_max=11000
+    {
+        printf '## 🤖 AI Code Review Artifacts\n\n'
+        printf 'Automated review for this PR. Each section is collapsible. Full untruncated artifacts are in the Slack review thread.\n'
+        for path in "${present[@]}"; do
+            name="$(basename "$path")"
+            label="${name%.md}"
+            printf '\n<details>\n<summary><b>%s</b></summary>\n\n' "$label"
+            bytes="$(wc -c < "$path" | tr -d ' ')"
+            if [[ "$bytes" -gt "$per_artifact_max" ]]; then
+                head -c "$per_artifact_max" "$path"
+                printf '\n\n_… truncated (%s of %s bytes shown) — see the full %s in the Slack review thread._\n' \
+                    "$per_artifact_max" "$bytes" "$name"
+            else
+                cat "$path"
+            fi
+            printf '\n\n</details>\n'
+        done
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            printf '\n_Note: these artifacts were not produced: %s_\n' "${missing[*]}"
+        fi
+    } > "$gh_body_file"
+    if gh pr comment "$pr_number" --repo "story-wizard/${repo}" --body-file "$gh_body_file" >/dev/null 2>&1; then
+        log "Posted review artifacts as a GitHub PR comment on story-wizard/${repo}#${pr_number}"
+    else
+        log "WARNING: gh pr comment failed for story-wizard/${repo}#${pr_number}"
+    fi
+    rm -f "$gh_body_file"
+elif [[ ${#present[@]} -gt 0 ]]; then
+    log "WARNING: gh CLI not found; skipped GitHub PR comment"
+fi
+
 # ---- 3. send finalize prompt to the Maestro agent ----
 # shellcheck source=_maestro_env.sh
 source "${script_dir}/_maestro_env.sh" || die "Cannot source _maestro_env.sh"
