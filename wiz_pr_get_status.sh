@@ -26,9 +26,22 @@
 
 set -uo pipefail
 
+# Pin gh to the bot account (needs `project` scope for Projects v2). `gh` uses
+# whatever account is active, which can silently flip to one without the scope
+# and break every project query. Force GH_TOKEN to the bot identity's token so
+# this works regardless of the active account. Only if not already set and the
+# token is retrievable; harmless when this script is invoked as a child of the
+# poller (which already exported GH_TOKEN).
+WIZ_GH_ACCOUNT="${WIZ_GH_ACCOUNT:-wiz-maestro}"
+if [[ -z "${GH_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
+    _wiz_tok="$(gh auth token --user "$WIZ_GH_ACCOUNT" 2>/dev/null)"
+    [[ -n "$_wiz_tok" ]] && export GH_TOKEN="$_wiz_tok"
+    unset _wiz_tok
+fi
+
 ORG="story-wizard"
 PROJECT_NUMBER=1
-VALID_REPOS=(wizard wizard-ai wizard-core wizard-release wizard-spec)
+VALID_REPOS=(wizard wizard-ai wizard-core wizard-release wizard-spec Qt-Advanced-Docking-System)
 
 emit_json=false
 die() {

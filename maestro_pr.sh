@@ -8,7 +8,7 @@
 # then layers in the PR-specific bits: playbook copy, PR-URL substitution,
 # `gh pr checkout`, and the auto-run launch.
 
-VALID_REPOS=(wizard wizard-ai wizard-core wizard-release wizard-spec)
+VALID_REPOS=(wizard wizard-ai wizard-core wizard-release wizard-spec Qt-Advanced-Docking-System)
 VALID_AGENT_TYPES=(claude-code codex opencode)
 PLAYBOOKS_SOURCE="${HOME}/src/Maestro-Playbooks/Development/Code-Review"
 
@@ -243,7 +243,12 @@ review_branch="${pr_head_ref}-review-$(date +%Y%m%d-%H%M%S)"
 
 printf "\n%s" "Checking out PR #${pr_number} as '${review_branch}' in worktree at ${worktree_dir}..."
 pushd "${worktree_dir}" || die "Cannot cd to ${worktree_dir}"
-gh pr checkout "$pr_number" --branch "$review_branch" \
+# Pass --repo explicitly: some repos (e.g. Qt-Advanced-Docking-System) are FORKS
+# whose local git remote points at the upstream (githubuser0xFFFF/mfreiholz), not
+# story-wizard. Without --repo, `gh pr checkout` resolves the PR against the
+# worktree's remote (the wrong repo) and fails with "Could not resolve to a
+# PullRequest". Anchoring to story-wizard/<repo> makes it work for forks too.
+gh pr checkout "$pr_number" --repo "story-wizard/${repo}" --branch "$review_branch" \
     || { popd || exit ; die "gh pr checkout failed"; }
 popd || exit
 

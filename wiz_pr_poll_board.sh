@@ -96,11 +96,27 @@ if [[ "$dry_run" == "false" ]]; then
 fi
 
 # ---- cheap pre-scan gate: project updatedAt ----
-proj_updated="$(gh api graphql -f query='
+# IMPORTANT: this is a fail-OPEN gate. We only skip the scan when the query
+# returns a real ISO-8601 timestamp that matches the last-seen value. If the
+# query errors (e.g. the gh token lost `read:project` scope, network blip), it
+# does NOT return a timestamp — and we must NOT treat that as "unchanged" and
+# skip, or the poller goes silently blind (this happened: an INSUFFICIENT_SCOPES
+# error blob was byte-identical every tick, so the gate skipped forever and no
+# PR got reviewed). On any non-timestamp result we log it and fall through to
+# the scan, which will surface the real error loudly.
+proj_updated_raw="$(gh api graphql -f query='
 query($org:String!,$num:Int!){
   organization(login:$org){ projectV2(number:$num){ updatedAt } }
 }' -F org="$WIZ_PROJECT_ORG" -F num="$WIZ_PROJECT_NUMBER" \
   --jq '.data.organization.projectV2.updatedAt' 2>/dev/null)"
+
+# Accept only a plausible ISO-8601 timestamp (e.g. 2026-07-01T18:20:21Z).
+proj_updated=""
+if [[ "$proj_updated_raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    proj_updated="$proj_updated_raw"
+elif [[ -n "$proj_updated_raw" ]]; then
+    log "WARNING: projectV2.updatedAt query did not return a timestamp (token scope / API error?) — NOT skipping; proceeding to scan. raw: $(printf '%s' "$proj_updated_raw" | head -c 200)"
+fi
 
 if [[ "$force" == "false" && -n "$proj_updated" && -f "$WIZ_POLL_SEEN" ]]; then
     last_seen="$(jq -r '.updatedAt // empty' "$WIZ_POLL_SEEN" 2>/dev/null)"
@@ -122,6 +138,7 @@ fi
 # board. That's harmless (no review runs on a closed PR) and a human can clear
 # it; gate 1 below still handles the race where a PR closes mid-tick.
 queued=""
+scan_error=""
 for repo in $WIZ_VALID_REPOS; do
     repo_json="$(gh api graphql -f query='
 query($owner:String!,$name:String!){
@@ -138,8 +155,16 @@ query($owner:String!,$name:String!){
       }
     }
   }
-}' -F owner="$WIZ_PROJECT_ORG" -F name="$repo" 2>/dev/null)"
+}' -F owner="$WIZ_PROJECT_ORG" -F name="$repo" 2>&1)"
     [[ -n "$repo_json" ]] || continue
+    # Detect a hard API/scope error (e.g. token lost read:project). Without this
+    # the jq path-miss on an error blob silently yields "no PRs" — a false
+    # negative that leaves queued PRs unreviewed. Fail LOUDLY instead.
+    if printf '%s' "$repo_json" | grep -q 'INSUFFICIENT_SCOPES\|"errors"'; then
+        scan_error="$(printf '%s' "$repo_json" | head -c 300)"
+        log "ERROR: board scan for ${repo} failed (API/scope error). raw: ${scan_error}"
+        break
+    fi
     # Emit "repo<TAB>number<TAB>OPEN<TAB>isDraft" for PRs queued on our project.
     repo_queued="$(echo "$repo_json" | jq -r \
         --arg q "$WIZ_QUEUE_STATUS" --arg repo "$repo" --argjson pnum "$WIZ_PROJECT_NUMBER" '
@@ -153,6 +178,15 @@ query($owner:String!,$name:String!){
     [[ -n "$repo_queued" ]] && queued+="${repo_queued}"$'\n'
 done
 queued="$(printf '%s' "$queued" | sed '/^$/d' | sort -u)"
+
+# If the scan hit a hard API/scope error, do NOT report a misleading success or
+# a false "no PRs". Emit an error summary and exit non-zero so the failure is
+# visible (cron alerts on non-zero exit even with local delivery).
+if [[ -n "$scan_error" ]]; then
+    jq -nc --arg err "$scan_error" \
+        '{ok:false, action:"scan_error", message:"board scan failed — check gh token read:project scope / active account", detail:$err}'
+    exit 1
+fi
 
 n_total=0; n_started=0; n_rereview=0; n_nochange=0; n_draft=0; n_closed=0; n_skipped=0
 
