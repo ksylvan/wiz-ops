@@ -84,9 +84,13 @@ reviewers="$(wiz_slack_reviewer_mentions "$repo" "$pr_number" "$author_id" 2>/de
 rev_suffix=""; [[ -n "$reviewers" ]] && rev_suffix=$'\n'"Reviewers: ${reviewers}"
 
 if [[ "$conclusion" == "success" ]]; then
+    # One-line installer the reviewer can copy-paste into Terminal. wizard-release
+    # is private, so raw.githubusercontent 404s without auth — fetch install.sh via
+    # `gh api` (authenticated) instead, per the repo README. TAG=… pins this build.
+    install_cmd="gh api repos/story-wizard/wizard-release/contents/scripts/install.sh --jq '.content' | base64 -d | TAG=${git_tag} bash"
     # Confirm the release actually exists before linking to it.
     if gh release view "$git_tag" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
-        post "✅ ${mention}Tagged build for PR #${pr_number} is ready: *${git_tag}*"$'\n'"Release: <${release_url}>${rev_suffix}"
+        post "✅ ${mention}Tagged build for PR #${pr_number} is ready: *${git_tag}*"$'\n'"Release: <${release_url}>"$'\n'"Install (paste in Terminal):"$'\n'"\`\`\`${install_cmd}\`\`\`${rev_suffix}"
     else
         post "✅ ${mention}Build run for PR #${pr_number} (\`${git_tag}\`) finished successfully, but I couldn't confirm the release page yet — it should appear shortly at <${release_url}> (<${run_url}|run log>).${rev_suffix}"
     fi
