@@ -47,6 +47,10 @@ set -uo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=wiz_pr_pipeline.env
 source "${script_dir}/wiz_pr_pipeline.env" || { echo '{"ok":false,"stage":"config","message":"cannot source wiz_pr_pipeline.env"}'; exit 1; }
+# shellcheck source=_wiz_slack.sh
+# Needed by the approval sweep, which posts the "Ready to Merge" notice itself
+# (unlike the build path, which delegates Slack posting to wiz_pr_build.sh).
+source "${script_dir}/_wiz_slack.sh" 2>/dev/null || true
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -91,6 +95,122 @@ acquire_lock() {
 }
 release_lock() { rm -rf "$WIZ_POLL_LOCK" 2>/dev/null || true; }
 
+# ---- approval sweep: approved PRs in a human review stage -> Ready to Merge ----
+# Runs EVERY tick, independent of the updatedAt skip-gate below, because an
+# approval happens on the PR (not the board) and does NOT bump projectV2.updatedAt.
+# For each OPEN PR whose Status is one of WIZ_APPROVE_SOURCE_STATUSES, advance to
+# WIZ_APPROVED_STATUS iff it has >=1 APPROVED review from a non-bot author and no
+# standing CHANGES_REQUESTED, then notify the author (existing Slack thread, else
+# a fresh root). The status flip is the idempotency claim. Sets n_approved.
+n_approved=0
+approval_sweep() {
+    local dry="$1" repo pr_number
+
+    for repo in $WIZ_VALID_REPOS; do
+        local rj
+        rj="$(gh api graphql -f query='
+query($owner:String!,$name:String!){
+  repository(owner:$owner,name:$name){
+    pullRequests(states:OPEN, first:100){
+      nodes{
+        number
+        author{ login }
+        latestReviews(first:50){ nodes{ author{ login } state } }
+        projectItems(first:10){
+          nodes{
+            project{ number }
+            fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue { name } }
+          }
+        }
+      }
+    }
+  }
+}' -F owner="$WIZ_PROJECT_ORG" -F name="$repo" 2>/dev/null)"
+        [[ -n "$rj" ]] || continue
+        printf '%s' "$rj" | grep -q 'INSUFFICIENT_SCOPES\|"errors"' && continue
+
+        # Emit "pr<TAB>author<TAB>status" for PRs that are (a) in a source status
+        # on our project, (b) have >=1 non-bot APPROVED review, (c) have NO
+        # standing CHANGES_REQUESTED from any non-bot reviewer.
+        local approved
+        approved="$(printf '%s' "$rj" | jq -r \
+            --argjson pnum "$WIZ_PROJECT_NUMBER" --arg srcs "$WIZ_APPROVE_SOURCE_STATUSES" '
+          ($srcs | split("|")) as $srclist
+          | .data.repository.pullRequests.nodes[]?
+          | . as $pr
+          | ([ .projectItems.nodes[]?
+               | select(.project.number == $pnum and .fieldValueByName != null
+                        and (.fieldValueByName.name as $s | $srclist | index($s)))
+               | .fieldValueByName.name ] | first) as $status
+          | select($status != null)
+          | ([ .latestReviews.nodes[]? | select(.author.login != "wiz-maestro") ]) as $human
+          | (any($human[]; .state == "APPROVED")) as $has_appr
+          | (any($human[]; .state == "CHANGES_REQUESTED")) as $has_block
+          | select($has_appr and ($has_block | not))
+          | [ ($pr.number|tostring), ($pr.author.login // ""), $status ] | @tsv
+        ' 2>/dev/null)"
+        [[ -n "$approved" ]] || continue
+
+        while IFS=$'\t' read -r pr_number author status; do
+            [[ -n "$pr_number" ]] || continue
+            if [[ "$dry" == "true" ]]; then
+                log "PR ${repo}#${pr_number}: APPROVED in '${status}' -> [dry-run] would set '${WIZ_APPROVED_STATUS}' + notify author '${author}'."
+                n_approved=$((n_approved + 1))
+                continue
+            fi
+            log "PR ${repo}#${pr_number}: APPROVED in '${status}' -> ${WIZ_APPROVED_STATUS}; notifying."
+            if "${script_dir}/wiz_pr_set_status.sh" "$repo" "$pr_number" "$WIZ_APPROVED_STATUS" >/dev/null 2>&1; then
+                approval_notify "$repo" "$pr_number" "$author" "$status"
+                n_approved=$((n_approved + 1))
+            else
+                log "  approval: failed to set status -> ${WIZ_APPROVED_STATUS} (will retry next tick)."
+            fi
+        done <<< "$approved"
+    done
+}
+
+# Post the "approved -> Ready to Merge" notice: into the existing Slack review
+# thread if one is recorded, else a fresh root in the active channel. @-mentions
+# the PR author (resolved via wiz_gh_to_slack) and names the approver(s).
+approval_notify() {
+    local repo="$1" pr_number="$2" author_login="$3" from_status="$4"
+    command -v wiz_slack_ready >/dev/null 2>&1 && wiz_slack_ready || { log "  approval: Slack not ready; status advanced, no notice."; return 0; }
+
+    local pr_url="https://github.com/story-wizard/${repo}/pull/${pr_number}"
+    local pr_title
+    pr_title="$(gh pr view "$pr_number" --repo "story-wizard/${repo}" --json title --jq '.title' 2>/dev/null)"
+    [[ -n "$pr_title" ]] || pr_title="PR #${pr_number}"
+
+    # Recover the existing review thread (same lookup the build path uses).
+    local thread_ts="" state_dir="${WIZ_PR_STATE_DIR:-${HOME}/wizard/tmp/wiz-pr-state}"
+    if [[ -d "$state_dir" ]]; then
+        thread_ts="$(
+            for sf in "$state_dir"/*.json; do
+                [[ -f "$sf" ]] || continue
+                jq -r --arg repo "$repo" --arg pr "$pr_number" '
+                  select(.repo == $repo and ((.pr_number|tostring) == $pr)) | .thread_ts // empty' "$sf" 2>/dev/null
+            done | grep -E '.' | sort -n | tail -1
+        )"
+    fi
+
+    # @-mention the author; name the approver(s) as context.
+    local author_sid author_mention="" approvers
+    author_sid="$(wiz_gh_to_slack "$author_login" 2>/dev/null)"
+    [[ -n "$author_sid" ]] && author_mention="<@${author_sid}> "
+    approvers="$(wiz_slack_reviewer_mentions "$repo" "$pr_number" "$author_sid" 2>/dev/null)"
+
+    local msg="✅ ${author_mention}*${pr_title}* (<${pr_url}>) has been **approved** and moved to *${WIZ_APPROVED_STATUS}* (from *${from_status}*)."
+    [[ -n "$approvers" ]] && msg+=$'\n'"Approved by: ${approvers}"
+
+    if [[ -n "$thread_ts" ]]; then
+        wiz_slack_post "$WIZ_ACTIVE_CHANNEL" "$thread_ts" "$msg" >/dev/null 2>&1 || true
+        log "  approval: notified in existing thread ${thread_ts}."
+    else
+        wiz_slack_post "$WIZ_ACTIVE_CHANNEL" "" "$msg" >/dev/null 2>&1 || true
+        log "  approval: notified via new root (no existing thread)."
+    fi
+}
+
 if [[ "$dry_run" == "false" ]]; then
     if ! acquire_lock; then
         log "another tick holds the lock; exiting."
@@ -99,6 +219,11 @@ if [[ "$dry_run" == "false" ]]; then
     fi
     trap release_lock EXIT
 fi
+
+# ---- approval sweep runs EVERY tick (before the updatedAt skip-gate) ----
+# An approval is an off-board event that doesn't bump projectV2.updatedAt, so it
+# must not be gated by the cheap skip below. Cheap enough (~1 call/repo).
+approval_sweep "$dry_run"
 
 # ---- cheap pre-scan gate: project updatedAt ----
 # IMPORTANT: this is a fail-OPEN gate. We only skip the scan when the query
@@ -126,8 +251,8 @@ fi
 if [[ "$force" == "false" && -n "$proj_updated" && -f "$WIZ_POLL_SEEN" ]]; then
     last_seen="$(jq -r '.updatedAt // empty' "$WIZ_POLL_SEEN" 2>/dev/null)"
     if [[ -n "$last_seen" && "$last_seen" == "$proj_updated" ]]; then
-        log "project unchanged since ${last_seen}; skipping scan."
-        echo '{"ok":true,"action":"skipped_unchanged"}'
+        log "project unchanged since ${last_seen}; skipping board-status scan (approval sweep already ran)."
+        jq -nc --argjson approved "$n_approved" '{ok:true, action:"skipped_unchanged", approved:$approved}'
         exit 0
     fi
 fi
@@ -393,8 +518,9 @@ jq -nc \
     --argjson rereview "$n_rereview" --argjson nochange "$n_nochange" \
     --argjson draft "$n_draft" --argjson closed "$n_closed" --argjson skipped "$n_skipped" \
     --argjson build "$n_build" --argjson build_skip "$n_build_skip" \
+    --argjson approved "$n_approved" \
     --argjson dry "$([[ "$dry_run" == "true" ]] && echo true || echo false)" \
     '{ok:true, action:"scanned", dry_run:$dry, queued_total:$total,
       started:$started, rereview:$rereview, no_changes:$nochange,
       draft:$draft, closed:$closed, skipped:$skipped,
-      build:$build, build_skip:$build_skip}'
+      build:$build, build_skip:$build_skip, approved:$approved}'

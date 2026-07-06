@@ -20,7 +20,13 @@
 #
 # Output (--json mode):
 #   {"ok":true,"repo":"...","pr":N,"on_board":true|false,
-#    "status":"AI Review 2"|null}
+#    "status":"AI Review 2"|null,"has_worktree":true|false}
+#
+# has_worktree is a deterministic cross-check: true iff a review worktree
+# (~/wizard/worktrees/<repo>/<repo>-pr-<pr>-*) actually exists on disk. A PR whose
+# board Status claims "AI Review N" but has NO worktree is a MIS-SET status (set
+# by hand, never backed by a real review) — the caller can treat that as "no
+# review in flight" instead of silently ignoring a re-trigger.
 #
 # Requires: gh (authenticated, with 'project' scope), jq.
 
@@ -75,6 +81,15 @@ for r in "${VALID_REPOS[@]}"; do [[ "$repo" == "$r" ]] && repo_ok=true && break;
 command -v gh >/dev/null 2>&1 || die "gh CLI not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 
+# ---- Deterministic cross-check: does a real review worktree exist on disk? ----
+# The poller creates ~/wizard/worktrees/<repo>/<repo>-pr-<pr>-<agent> when a review
+# actually launches. If the board says "AI Review N" but no such worktree exists,
+# the status was hand-set and no review is really in flight.
+has_worktree=false
+for _wt in "${HOME}/wizard/worktrees/${repo}/${repo}-pr-${pr_number}-"*; do
+  [[ -d "$_wt" ]] && { has_worktree=true; break; }
+done
+
 # ---- Resolve project id (to filter the PR's project items to the right board) ----
 proj_json=$(gh api graphql -f org="$ORG" -F number="$PROJECT_NUMBER" -f query='
 query($org:String!, $number:Int!) {
@@ -114,8 +129,8 @@ on_board=$(echo "$item_json" | jq -r --arg pid "$project_id" \
 
 if [[ "$on_board" == "0" ]]; then
   if [[ "$emit_json" == true ]]; then
-    jq -nc --arg repo "$repo" --argjson pr "$pr_number" \
-      '{ok:true, repo:$repo, pr:$pr, on_board:false, status:null}'
+    jq -nc --arg repo "$repo" --argjson pr "$pr_number" --argjson wt "$has_worktree" \
+      '{ok:true, repo:$repo, pr:$pr, on_board:false, status:null, has_worktree:$wt}'
   else
     echo "(none)"
   fi
@@ -130,11 +145,11 @@ status_name=$(echo "$item_json" | jq -r --arg pid "$project_id" \
 
 if [[ "$emit_json" == true ]]; then
   if [[ -z "$status_name" ]]; then
-    jq -nc --arg repo "$repo" --argjson pr "$pr_number" \
-      '{ok:true, repo:$repo, pr:$pr, on_board:true, status:null}'
+    jq -nc --arg repo "$repo" --argjson pr "$pr_number" --argjson wt "$has_worktree" \
+      '{ok:true, repo:$repo, pr:$pr, on_board:true, status:null, has_worktree:$wt}'
   else
-    jq -nc --arg repo "$repo" --argjson pr "$pr_number" --arg s "$status_name" \
-      '{ok:true, repo:$repo, pr:$pr, on_board:true, status:$s}'
+    jq -nc --arg repo "$repo" --argjson pr "$pr_number" --arg s "$status_name" --argjson wt "$has_worktree" \
+      '{ok:true, repo:$repo, pr:$pr, on_board:true, status:$s, has_worktree:$wt}'
   fi
 else
   if [[ -z "$status_name" ]]; then
