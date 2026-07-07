@@ -129,9 +129,11 @@ query($owner:String!,$name:String!){
         [[ -n "$rj" ]] || continue
         printf '%s' "$rj" | grep -q 'INSUFFICIENT_SCOPES\|"errors"' && continue
 
-        # Emit "pr<TAB>author<TAB>status" for PRs that are (a) in a source status
-        # on our project, (b) have >=1 non-bot APPROVED review, (c) have NO
-        # standing CHANGES_REQUESTED from any non-bot reviewer.
+        # Emit "pr<TAB>author<TAB>status<TAB>approver_logins" for PRs that are
+        # (a) in a source status on our project, (b) have >=1 non-bot APPROVED
+        # review, (c) have NO standing CHANGES_REQUESTED. approver_logins is the
+        # comma-joined set of non-bot authors whose CURRENT review is APPROVED —
+        # this is who to credit, NOT the union of all reviewers/requested.
         local approved
         approved="$(printf '%s' "$rj" | jq -r \
             --argjson pnum "$WIZ_PROJECT_NUMBER" --arg srcs "$WIZ_APPROVE_SOURCE_STATUSES" '
@@ -144,23 +146,24 @@ query($owner:String!,$name:String!){
                | .fieldValueByName.name ] | first) as $status
           | select($status != null)
           | ([ .latestReviews.nodes[]? | select(.author.login != "wiz-maestro") ]) as $human
-          | (any($human[]; .state == "APPROVED")) as $has_appr
+          | ([ $human[] | select(.state == "APPROVED") | .author.login ] | unique) as $approvers
+          | (($approvers | length) > 0) as $has_appr
           | (any($human[]; .state == "CHANGES_REQUESTED")) as $has_block
           | select($has_appr and ($has_block | not))
-          | [ ($pr.number|tostring), ($pr.author.login // ""), $status ] | @tsv
+          | [ ($pr.number|tostring), ($pr.author.login // ""), $status, ($approvers | join(",")) ] | @tsv
         ' 2>/dev/null)"
         [[ -n "$approved" ]] || continue
 
-        while IFS=$'\t' read -r pr_number author status; do
+        while IFS=$'\t' read -r pr_number author status approver_logins; do
             [[ -n "$pr_number" ]] || continue
             if [[ "$dry" == "true" ]]; then
-                log "PR ${repo}#${pr_number}: APPROVED in '${status}' -> [dry-run] would set '${WIZ_APPROVED_STATUS}' + notify author '${author}'."
+                log "PR ${repo}#${pr_number}: APPROVED in '${status}' by [${approver_logins}] -> [dry-run] would set '${WIZ_APPROVED_STATUS}' + notify author '${author}'."
                 n_approved=$((n_approved + 1))
                 continue
             fi
-            log "PR ${repo}#${pr_number}: APPROVED in '${status}' -> ${WIZ_APPROVED_STATUS}; notifying."
+            log "PR ${repo}#${pr_number}: APPROVED in '${status}' by [${approver_logins}] -> ${WIZ_APPROVED_STATUS}; notifying."
             if "${script_dir}/wiz_pr_set_status.sh" "$repo" "$pr_number" "$WIZ_APPROVED_STATUS" >/dev/null 2>&1; then
-                approval_notify "$repo" "$pr_number" "$author" "$status"
+                approval_notify "$repo" "$pr_number" "$author" "$status" "$approver_logins"
                 n_approved=$((n_approved + 1))
             else
                 log "  approval: failed to set status -> ${WIZ_APPROVED_STATUS} (will retry next tick)."
@@ -171,9 +174,9 @@ query($owner:String!,$name:String!){
 
 # Post the "approved -> Ready to Merge" notice: into the existing Slack review
 # thread if one is recorded, else a fresh root in the active channel. @-mentions
-# the PR author (resolved via wiz_gh_to_slack) and names the approver(s).
+# the PR author (resolved via wiz_gh_to_slack) and names the ACTUAL approver(s).
 approval_notify() {
-    local repo="$1" pr_number="$2" author_login="$3" from_status="$4"
+    local repo="$1" pr_number="$2" author_login="$3" from_status="$4" approver_logins="$5"
     command -v wiz_slack_ready >/dev/null 2>&1 && wiz_slack_ready || { log "  approval: Slack not ready; status advanced, no notice."; return 0; }
 
     local pr_url="https://github.com/story-wizard/${repo}/pull/${pr_number}"
@@ -193,11 +196,32 @@ approval_notify() {
         )"
     fi
 
-    # @-mention the author; name the approver(s) as context.
-    local author_sid author_mention="" approvers
+    local author_sid author_mention=""
     author_sid="$(wiz_gh_to_slack "$author_login" 2>/dev/null)"
     [[ -n "$author_sid" ]] && author_mention="<@${author_sid}> "
-    approvers="$(wiz_slack_reviewer_mentions "$repo" "$pr_number" "$author_sid" 2>/dev/null)"
+
+    # Name the ACTUAL approvers (from latestReviews==APPROVED, passed in), NOT the
+    # full reviewer/requested-reviewer union. Resolve each login -> Slack mention;
+    # dedupe; skip the author (self-approval is impossible but be safe) and any
+    # unmapped/bot login (empty from wiz_gh_to_slack).
+    local approvers="" seen=" " login sid
+    local _oldifs="$IFS"; IFS=','
+    for login in $approver_logins; do
+        IFS="$_oldifs"
+        [[ -n "$login" ]] || continue
+        sid="$(wiz_gh_to_slack "$login" 2>/dev/null)"
+        if [[ -n "$sid" ]]; then
+            [[ "$seen" == *" ${sid} "* ]] && continue
+            seen+="${sid} "
+            approvers+="<@${sid}> "
+        else
+            # Unmapped login: fall back to the raw GitHub handle so credit is not lost.
+            approvers+="${login} "
+        fi
+        IFS=','
+    done
+    IFS="$_oldifs"
+    approvers="${approvers% }"
 
     local msg="✅ ${author_mention}*${pr_title}* (<${pr_url}>) has been **approved** and moved to *${WIZ_APPROVED_STATUS}* (from *${from_status}*)."
     [[ -n "$approvers" ]] && msg+=$'\n'"Approved by: ${approvers}"
