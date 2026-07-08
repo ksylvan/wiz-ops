@@ -81,9 +81,22 @@ wiz_slack_reviewer_mentions() {
     # (assigned but not yet acted) — so an assigned reviewer is pinged even
     # before they post. Bots and unmapped logins are skipped; an optional Slack
     # id to exclude (e.g. the thread author) avoids a double ping.
+    #
+    # The PR's OWN AUTHOR is ALWAYS excluded: an author is not a reviewer of
+    # their own PR, but they frequently leave COMMENTED reviews on it (which land
+    # in the reviews list), so without this guard the author is wrongly listed as
+    # a reviewer (seen live on wizard#806: "Reviewers: @Harry @Kayvan" where
+    # Kayvan was the author). This is enforced here (not left to the caller's
+    # exclude arg) because the caller's exclude is often the Slack-thread author,
+    # which is empty/different for board-triggered self-posted threads.
     local repo="$1" pr="$2" exclude="${3:-}"
     [[ -n "$repo" && -n "$pr" ]] || return 0
     command -v wiz_gh_to_slack >/dev/null 2>&1 || return 0
+
+    # Resolve the PR author's Slack id so we can always skip them.
+    local author_login author_sid=""
+    author_login="$(gh api "repos/story-wizard/${repo}/pulls/${pr}" --jq '.user.login' 2>/dev/null)"
+    [[ -n "$author_login" ]] && author_sid="$(wiz_gh_to_slack "$author_login")"
 
     local logins login sid seen=" " out=""
     # Union of: (a) logins that submitted a review, and (b) still-requested
@@ -99,9 +112,10 @@ wiz_slack_reviewer_mentions() {
     while IFS= read -r login; do
         [[ -n "$login" ]] || continue
         sid="$(wiz_gh_to_slack "$login")"
-        [[ -n "$sid" ]] || continue                 # unmapped (or a bot) -> skip
+        [[ -n "$sid" ]] || continue                     # unmapped (or a bot) -> skip
+        [[ -n "$author_sid" && "$sid" == "$author_sid" ]] && continue  # never the author
         [[ -n "$exclude" && "$sid" == "$exclude" ]] && continue
-        [[ "$seen" == *" ${sid} "* ]] && continue   # dedupe slack ids
+        [[ "$seen" == *" ${sid} "* ]] && continue       # dedupe slack ids
         seen+="${sid} "
         out+="<@${sid}> "
     done <<< "$logins"
