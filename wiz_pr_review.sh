@@ -30,6 +30,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${script_dir}/wiz_pr_pipeline.env" || { echo '{"ok":false,"stage":"config","message":"cannot source wiz_pr_pipeline.env"}'; exit 1; }
 # shellcheck source=_wiz_slack.sh
 source "${script_dir}/_wiz_slack.sh" || { echo '{"ok":false,"stage":"config","message":"cannot source _wiz_slack.sh"}'; exit 1; }
+# shellcheck source=wiz_pr_review_state.sh
+source "${script_dir}/wiz_pr_review_state.sh" || { echo '{"ok":false,"stage":"config","message":"cannot source wiz_pr_review_state.sh"}'; exit 1; }
 
 dest_channel="${WIZ_ACTIVE_CHANNEL}"
 
@@ -49,6 +51,12 @@ react_swap() {
 post_fail() {
     # post_fail <stage> <message> — report to active channel + emit JSON, exit 1
     local stage="$1" msg="$2" text
+    # If this invocation created fresh setup but has not entered the uncertain
+    # launch window, remove it so the next attempt cannot collide.
+    if command -v fresh_cleanup_prelaunch >/dev/null 2>&1 \
+        && [[ "${fresh_setup_maybe:-false}" == "true" && "${fresh_launch_maybe:-false}" != "true" ]]; then
+        fresh_cleanup_prelaunch
+    fi
     # Swap the in-progress reaction (if any) to the failed marker.
     react_swap "${WIZ_REACT_INPROGRESS}" "${WIZ_REACT_FAILED}"
     text="❌ *PR review setup failed* for \`story-wizard/${repo:-?}\` PR #${pr_number:-?} at stage *${stage}*."$'\n'"\`\`\`"$'\n'"${msg}"$'\n'"\`\`\`"
@@ -76,8 +84,31 @@ pr_number="$2"
 agent_type="${3:-$WIZ_DEFAULT_AGENT_TYPE}"
 thread_ts="${4:-}"
 
+# Crucible round 1 is always assigned by parity when alternation is enabled.
+# Explicit agent arguments remain supported when the feature toggle is off.
+review_round=1
+if [[ "${WIZ_REVIEW_ALTERNATE_AGENTS:-false}" == "true" ]]; then
+    agent_type="$(wiz_review_agent_for_round "$review_round")"
+fi
+
 command -v jq >/dev/null 2>&1 || { echo '{"ok":false,"stage":"deps","message":"jq not found"}'; exit 1; }
 [[ "$pr_number" =~ ^[0-9]+$ ]] || post_fail "args" "PR number must be numeric, got '${pr_number}'"
+
+# Fresh and re-review share one stale-recoverable launch lock per PR. Acquire it
+# before PR lookup or a board-triggered Slack root so concurrent triggers cannot
+# create duplicate announcements, worktrees, agents, or canonical state.
+fresh_lock_dir=""
+run_log=""
+fresh_exit_cleanup() {
+    [[ -n "$run_log" ]] && rm -f "$run_log"
+    wiz_review_launch_lock_release "$fresh_lock_dir"
+}
+trap fresh_exit_cleanup EXIT
+if ! fresh_lock_dir="$(wiz_review_launch_lock_acquire "$repo" "$pr_number")"; then
+    jq -nc --arg repo "$repo" --arg pr "$pr_number" \
+        '{ok:true,action:"busy",repo:$repo,pr_number:$pr,message:"another review launch is already preparing"}'
+    exit 0
+fi
 
 # ---- fetch PR title + url (also validates existence) ----
 pr_meta=$(gh pr view "$pr_number" --repo "story-wizard/${repo}" --json title,url,state,isDraft,author 2>&1) \
@@ -106,19 +137,92 @@ if [[ "$board_trigger" == "true" ]]; then
     fi
 fi
 
-# ---- 1. run maestro_pr.sh ----
+# ---- 1. prepare worktree/agent/playbooks WITHOUT launching ----
+worktree_name="${repo}-pr-${pr_number}-${agent_type}"
+worktree_dir="${HOME}/wizard/worktrees/${repo}/${worktree_name}"
+autorun_dir="${HOME}/wizard/worktrees/autorun/${repo}/${worktree_name}"
+state_file="$(wiz_review_state_file "$repo" "$pr_number")"
 run_log="$(mktemp -t wiz_pr_review.XXXXXX)"
-trap 'rm -f "$run_log"' EXIT
-"${script_dir}/maestro_pr.sh" "$repo" "$pr_number" "$agent_type" >"$run_log" 2>&1
+fresh_setup_maybe=false
+fresh_launch_maybe=false
+
+fresh_cleanup_prelaunch() {
+    rm -f "$state_file"
+    "${script_dir}/maestro_wt.sh" --delete --force "$repo" "pr-${pr_number}" "$agent_type" >/dev/null 2>&1 || true
+}
+fresh_handle_signal() {
+    local code="$1"
+    # Before entering the side-effecting launch command, setup is known safe to
+    # remove. Once launch outcome is uncertain, retain launching state fail-closed.
+    if [[ "$fresh_setup_maybe" == "true" && "$fresh_launch_maybe" != "true" ]]; then
+        fresh_cleanup_prelaunch
+    fi
+    exit "$code"
+}
+trap 'fresh_handle_signal 130' INT
+trap 'fresh_handle_signal 143' TERM
+
+# Never let fresh-review failure cleanup delete a pre-existing review.
+if [[ -e "$worktree_dir" || -s "$state_file" ]] \
+    || "${script_dir}/maestro_id.sh" "$worktree_name" >/dev/null 2>&1; then
+    post_fail "existing_review" "worktree, agent, or canonical state already exists for ${worktree_name}; use re-review"
+fi
+
+fresh_setup_maybe=true
+"${script_dir}/maestro_pr.sh" --no-run "$repo" "$pr_number" "$agent_type" >"$run_log" 2>&1
 rc=$?
-[[ $rc -eq 0 ]] || post_fail "maestro_pr" "maestro_pr.sh exited ${rc}. Last output:"$'\n'"$(tail -25 "$run_log")"
+if [[ $rc -ne 0 ]]; then
+    fresh_cleanup_prelaunch
+    post_fail "maestro_pr" "maestro_pr.sh exited ${rc}. Last output:"$'\n'"$(tail -25 "$run_log")"
+fi
 
 # ---- derive agent id + autorun dir ----
-worktree_name="${repo}-pr-${pr_number}-${agent_type}"
-autorun_dir="${HOME}/wizard/worktrees/autorun/${repo}/${worktree_name}"
 agent_id="$(grep -E 'Agent ID' "$run_log" | tail -1 | sed -E 's/.*Agent ID[[:space:]]*:[[:space:]]*//' | tr -d '[:space:]')"
 [[ -n "$agent_id" ]] || agent_id="$("${script_dir}/maestro_id.sh" "$worktree_name" 2>/dev/null | tr -d '[:space:]')"
 [[ -n "$agent_id" ]] || post_fail "agent_id" "could not determine Maestro agent id (worktree ${worktree_name})"
+review_head="$(git -C "$worktree_dir" rev-parse HEAD 2>/dev/null)"
+[[ -n "$review_head" ]] || post_fail "git" "could not determine review HEAD in ${worktree_dir}"
+
+# Resolve Maestro CLI before committing canonical launch state.
+# shellcheck source=_maestro_env.sh
+source "${script_dir}/_maestro_env.sh" || post_fail "maestro_env" "cannot source _maestro_env.sh"
+
+# Canonical PR-level state must exist BEFORE launch. This makes state failure
+# fail closed: no untracked Auto Run can start. Each launch has a unique attempt
+# id so a failed-attempt watcher cannot affect a same-round retry.
+attempt_id="r${review_round}-$(date +%s)-$$-${RANDOM}"
+if ! wiz_review_state_record_launch "$repo" "$pr_number" "$review_round" "$agent_type" \
+    "$review_head" "$thread_ts" "$agent_id" "$worktree_name" "$worktree_dir" "$autorun_dir" "launching" "$attempt_id"; then
+    "${script_dir}/maestro_wt.sh" --delete --force "$repo" "pr-${pr_number}" "$agent_type" >/dev/null 2>&1 || true
+    rm -f "$state_file"
+    post_fail "state" "could not initialize canonical review state; prepared agent was removed"
+fi
+
+playbook_dir="${autorun_dir}/development/code-review"
+fresh_launch_maybe=true
+launch_out="$(node "$maestro_cli" auto-run -a "$agent_id" "${playbook_dir}"/* --launch 2>&1)"; launch_rc=$?
+launch_warning=""
+if [[ $launch_rc -ne 0 ]]; then
+    # Async launch may have escaped despite a nonzero CLI status. Keep setup and
+    # canonical state, then let the bounded watcher prove completion or failure.
+    launch_warning="${agent_type} launch returned rc=${launch_rc}; treating outcome as uncertain: $(printf '%s' "$launch_out" | tail -3 | tr '\n' ' ')"
+fi
+
+# Watch immediately after launch. Even if the running-state update fails, this
+# watcher can finish/finalize the exact round and mark it completed.
+log_dir="${HOME}/wizard/tmp/wiz-pr-logs"; mkdir -p "$log_dir"
+watch_log="${log_dir}/${worktree_name}-$(date +%Y%m%d-%H%M%S).log"
+nohup "${script_dir}/wiz_pr_watch_finalize.sh" \
+    "$repo" "$pr_number" "$agent_id" "$autorun_dir" "$pr_title" "$pr_url" "$thread_ts" \
+    "$agent_type" "$review_round" "$attempt_id" >"$watch_log" 2>&1 &
+watcher_pid=$!
+disown "$watcher_pid" 2>/dev/null || true
+
+watcher_state_set=true
+wiz_review_state_record_watcher "$repo" "$pr_number" "$review_round" "$watcher_pid" "$watch_log" "$attempt_id" \
+    || watcher_state_set=false
+state_running_set=true
+wiz_review_state_mark_status "$repo" "$pr_number" "$review_round" "running" "$attempt_id" || state_running_set=false
 
 # ---- persist thread -> PR state so a later "re-review" reply can recover it ----
 # A re-review request arrives as a threaded reply with NO PR link, so it cannot
@@ -149,17 +253,11 @@ if ! status_msg=$("${script_dir}/wiz_pr_set_status.sh" "$repo" "$pr_number" "AI 
     status_set=false
 fi
 
-# ---- 3. launch detached watcher ----
-log_dir="${HOME}/wizard/tmp/wiz-pr-logs"; mkdir -p "$log_dir"
-watch_log="${log_dir}/${worktree_name}-$(date +%Y%m%d-%H%M%S).log"
-nohup "${script_dir}/wiz_pr_watch_finalize.sh" \
-    "$repo" "$pr_number" "$agent_id" "$autorun_dir" "$pr_title" "$pr_url" "$thread_ts" \
-    >"$watch_log" 2>&1 &
-watcher_pid=$!
-disown "$watcher_pid" 2>/dev/null || true
-
 # ---- 4. post the start-ack (threaded) ----
-ack="🤖 Started AI code review for *${pr_title}* (<${pr_url}>) — Maestro agent \`${agent_id}\` is running."
+ack="🤖 Started AI code review #${review_round} with *${agent_type}* for *${pr_title}* (<${pr_url}>) — Maestro agent \`${agent_id}\` is running."
+[[ "$state_running_set" != "true" ]] && ack+=$'\n'"⚠️ Canonical state remains *launching*; watcher will mark it completed or failed."
+[[ "$watcher_state_set" != "true" ]] && ack+=$'\n'"⚠️ Watcher PID could not be recorded; automatic abrupt-death recovery is unavailable for this round."
+[[ -n "$launch_warning" ]] && ack+=$'\n'"⚠️ ${launch_warning}; bounded watcher verification is authoritative."
 if [[ "$status_set" == "true" ]]; then
     ack+=" Project status set to *AI Review 1*."
 else
@@ -174,10 +272,12 @@ fi
 jq -nc \
     --arg repo "$repo" --arg pr "$pr_number" \
     --arg title "$pr_title" --arg url "$pr_url" \
-    --arg agent "$agent_id" --arg autorun "$autorun_dir" \
-    --argjson status_set "$status_set" --arg status_msg "$status_msg" \
+    --arg agent "$agent_id" --arg agent_type "$agent_type" --arg autorun "$autorun_dir" \
+    --argjson round "$review_round" --arg head "$review_head" \
+    --argjson status_set "$status_set" --arg status_msg "$status_msg" --argjson state_running_set "$state_running_set" \
     --arg pid "$watcher_pid" --arg wlog "$watch_log" --arg ch "$dest_channel" \
-    '{ok:true, repo:$repo, pr_number:$pr, pr_title:$title, pr_url:$url,
-      agent_id:$agent, autorun_dir:$autorun, status_set:$status_set,
+    '{ok:true, action:"review", repo:$repo, pr_number:$pr, pr_title:$title, pr_url:$url,
+      agent_id:$agent, agent_type:$agent_type, review_round:$round, head:$head,
+      autorun_dir:$autorun, status_set:$status_set, state_running_set:$state_running_set,
       status_message:$status_msg, watcher_pid:$pid, watcher_log:$wlog,
       posted_to:$ch}'

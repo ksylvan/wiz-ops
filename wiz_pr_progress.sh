@@ -24,6 +24,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Pull defaults (agent type) from the shared env if present; non-fatal if not.
 # shellcheck source=wiz_pr_pipeline.env
 [[ -f "${script_dir}/wiz_pr_pipeline.env" ]] && source "${script_dir}/wiz_pr_pipeline.env" 2>/dev/null || true
+# shellcheck source=wiz_pr_review_state.sh
+[[ -f "${script_dir}/wiz_pr_review_state.sh" ]] && source "${script_dir}/wiz_pr_review_state.sh" 2>/dev/null || true
 DEFAULT_AGENT="${WIZ_DEFAULT_AGENT_TYPE:-claude-code}"
 ARTIFACTS=(REVIEW_SCOPE.md CODE_ISSUES.md SECURITY_ISSUES.md TEST_GAPS.md REVIEW_SUMMARY.md)
 
@@ -52,8 +54,16 @@ set -- "${args[@]+"${args[@]}"}"
 # ---- resolve the autorun dir ----
 if [[ -z "$autorun_dir" ]]; then
     [[ $# -ge 2 ]] || { usage >&2; exit 1; }
-    repo="$1"; pr_number="$2"; agent_type="${3:-$DEFAULT_AGENT}"
+    repo="$1"; pr_number="$2"; agent_type="${3:-}"
     [[ "$pr_number" =~ ^[0-9]+$ ]] || die "PR number must be numeric, got '${pr_number}'"
+    if [[ -z "$agent_type" && "${WIZ_REVIEW_ALTERNATE_AGENTS:-false}" == "true" ]] \
+        && command -v wiz_review_state_file >/dev/null 2>&1; then
+        # Progress is contractually read-only: consult canonical state only if
+        # it already exists; never bootstrap/write state from this command.
+        progress_sf="$(wiz_review_state_file "$repo" "$pr_number")"
+        [[ -s "$progress_sf" ]] && agent_type="$(jq -r '.active_agent_type // empty' "$progress_sf" 2>/dev/null)"
+    fi
+    agent_type="${agent_type:-$DEFAULT_AGENT}"
     worktree_name="${repo}-pr-${pr_number}-${agent_type}"
     autorun_dir="${HOME}/wizard/worktrees/autorun/${repo}/${worktree_name}"
 fi

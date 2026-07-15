@@ -224,11 +224,18 @@ rm -f "${playbook_dest}/README.md"
 [[ -f "${playbook_dest}/1_ANALYZE_CHANGES.md" ]] \
     || die "Playbooks missing 1_ANALYZE_CHANGES.md after setup"
 
-# Substitute the placeholder PR URL in the analyze-changes document
+# Substitute ONLY the displayed placeholder PR URL. The validation task below
+# intentionally keeps the literal USER/PROJECT/pull/XXXX sentinel; replacing it
+# too makes the real PR URL compare equal to "the placeholder" and stalls every
+# literal agent (observed with Codex on wizard#885).
 perl -pi -e \
-    's@https://github\.com/USER/PROJECT/pull/XXXX@https://github.com/story-wizard/'"${repo}"'/pull/'"${pr_number}"'@g' \
+    'if (/^\*\*Pull Request\*\*:/) { s@https://github\.com/USER/PROJECT/pull/XXXX@https://github.com/story-wizard/'"${repo}"'/pull/'"${pr_number}"'@; }' \
     "${playbook_dest}/1_ANALYZE_CHANGES.md" \
     || die "Failed to update PR URL in 1_ANALYZE_CHANGES.md"
+# The URL is configured by this script, so remove the template's human setup note.
+perl -pi -e 's@^NOTE: \*\(Update the URL above before running this playbook\)\*$@NOTE: *(Configured automatically by maestro_pr.sh)*@' \
+    "${playbook_dest}/1_ANALYZE_CHANGES.md" \
+    || die "Failed to update PR configuration note"
 
 echo "Playbooks configured."
 
