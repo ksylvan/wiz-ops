@@ -20,6 +20,7 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 failure_reason="watcher exited before verified finalization"
 finalized=false
 terminal_lock=""
+recoverable_head_drift=false
 die() { failure_reason="$*"; echo "Error: $*" >&2; exit 1; }
 run_bounded() {
     local seconds="$1"
@@ -89,7 +90,9 @@ watcher_exit() {
         terminal_lock=""
         return "$rc"
     fi
-    if command -v wiz_slack_ready >/dev/null 2>&1 && wiz_slack_ready; then
+    if [[ "$recoverable_head_drift" == true ]] && finalization_is_pristine && queue_retry_is_pending; then
+        log "Head drift has a queued replacement; canonical attempt failed without a Slack failure notification."
+    elif command -v wiz_slack_ready >/dev/null 2>&1 && wiz_slack_ready; then
         fail_msg="❌ AI review${round_label}${agent_type:+ by *${agent_type}*} for *${pr_title}* (<${pr_url}>) failed before a verified GitHub review was submitted."
         fail_msg+=$'\n'"Reason: ${failure_reason}"
         wiz_slack_post "${WIZ_ACTIVE_CHANNEL}" "$thread_ts" "$fail_msg" >/dev/null 2>&1 || true
@@ -139,6 +142,23 @@ ensure_live_head_matches() {
     live="$(gh pr view "$pr_number" --repo "story-wizard/${repo}" --json headRefOid --jq '.headRefOid' 2>/dev/null)"
     [[ -n "$live" && "$live" == "$expected_head" ]] || return 1
     return 0
+}
+queue_retry_is_pending() {
+    local status_json status
+    [[ -x "${script_dir}/wiz_pr_get_status.sh" ]] || return 1
+    status_json="$("${script_dir}/wiz_pr_get_status.sh" "$repo" "$pr_number" --json 2>/dev/null)" || return 1
+    status="$(printf '%s' "$status_json" | jq -r '.status // empty' 2>/dev/null)"
+    [[ "$status" == "${WIZ_QUEUE_STATUS:-Queue AI Review}" ]]
+}
+finalization_is_pristine() {
+    local sf
+    sf="$(wiz_review_state_file "$repo" "$pr_number")"
+    [[ -s "$sf" ]] || return 1
+    [[ "$(jq -r '(.finalization_phases // {}) | length' "$sf" 2>/dev/null)" == 0 ]]
+}
+head_drift_die() {
+    recoverable_head_drift=true
+    die "$1"
 }
 
 dest_channel="${WIZ_ACTIVE_CHANNEL}"
@@ -319,7 +339,7 @@ else
     fi
     if ! ensure_live_head_matches; then
         wiz_review_launch_lock_release "$artifact_lock"
-        die "live PR head changed before Slack artifact publication; refusing stale artifacts"
+        head_drift_die "live PR head changed before Slack artifact publication; refusing stale artifacts"
     fi
     wiz_review_state_claim_finalization_phase "$repo" "$pr_number" "$review_round" "$review_attempt" slack_artifacts "$review_generation" \
         || { wiz_review_launch_lock_release "$artifact_lock"; die "could not durably claim Slack artifact upload"; }
@@ -357,7 +377,7 @@ elif [[ ${#present[@]} -gt 0 ]] && command -v gh >/dev/null 2>&1; then
     fi
     if ! ensure_live_head_matches; then
         wiz_review_launch_lock_release "$github_artifact_lock"
-        die "live PR head changed before GitHub artifact publication; refusing stale artifacts"
+        head_drift_die "live PR head changed before GitHub artifact publication; refusing stale artifacts"
     fi
     wiz_review_state_claim_finalization_phase "$repo" "$pr_number" "$review_round" "$review_attempt" github_artifacts "$review_generation" \
         || { wiz_review_launch_lock_release "$github_artifact_lock"; die "could not durably claim GitHub artifact comment"; }
@@ -420,7 +440,7 @@ reviews_json="$(gh api "repos/story-wizard/${repo}/pulls/${pr_number}/reviews" -
     | jq -c 'add' 2>/dev/null)" || { wiz_review_launch_lock_release "$final_review_lock"; die "cannot inspect existing GitHub reviews"; }
 if ! ensure_live_head_matches; then
     wiz_review_launch_lock_release "$final_review_lock"
-    die "live PR head changed before final-review reconciliation/send; refusing stale finalization"
+    head_drift_die "live PR head changed before final-review reconciliation/send; refusing stale finalization"
 fi
 new_review="$(printf '%s' "$reviews_json" | jq -c --arg me "$me" --arg head "$expected_head" --argjson since "$attempt_epoch" '
   [.[] | select(.user.login==$me and .commit_id==$head) |
@@ -503,7 +523,7 @@ stop_if_stale
 live_head="$(gh pr view "$pr_number" --repo "story-wizard/${repo}" --json headRefOid --jq '.headRefOid' 2>/dev/null)"
 [[ -n "$live_head" ]] || die "cannot determine live PR head before completion"
 [[ "$live_head" == "$expected_head" ]] \
-    || die "live PR head ${live_head} advanced after review of ${expected_head}; refusing stale completion"
+    || head_drift_die "live PR head ${live_head} advanced after review of ${expected_head}; refusing stale completion"
 
 # Hold the per-PR lock across canonical completion and its terminal Slack
 # message/reaction so a successor cannot begin startup between them.
@@ -511,7 +531,7 @@ terminal_lock="$(wiz_review_launch_lock_acquire "$repo" "$pr_number" \
     "${WIZ_FINALIZER_LOCK_WAIT_TRIES:-1200}" 2>/dev/null || true)"
 [[ -n "$terminal_lock" ]] || die "could not acquire per-PR terminal completion lock"
 stop_if_stale
-ensure_live_head_matches || die "PR head changed before locked terminal completion"
+ensure_live_head_matches || head_drift_die "PR head changed before locked terminal completion"
 
 # Never auto-dismiss an older CHANGES_REQUESTED review. GitHub pushes cannot be
 # serialized by the local lock, so automatic dismissal could unblock a newly
@@ -537,7 +557,7 @@ fi
 post_complete_head="$(gh pr view "$pr_number" --repo "story-wizard/${repo}" --json headRefOid --jq '.headRefOid' 2>/dev/null)"
 [[ -n "$post_complete_head" ]] || die "cannot determine live PR head after canonical completion"
 [[ "$post_complete_head" == "$expected_head" ]] \
-    || die "PR head advanced to ${post_complete_head} during completion of ${expected_head}; reverting completion"
+    || head_drift_die "PR head advanced to ${post_complete_head} during completion of ${expected_head}; reverting completion"
 finalized=true
 
 # ---- 4. final confirmation, @-mentioning the original poster ----
