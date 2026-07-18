@@ -224,12 +224,15 @@ last_error_ms="$(jq -r '.auto_resume_last_error_ms // 0' "$(wiz_review_state_fil
 auto_resume_max="${WIZ_WATCH_AUTO_RESUME_MAX:-2}"
 auto_resume_backoff="${WIZ_WATCH_AUTO_RESUME_BACKOFF:-15}"
 resume_command_timeout="${WIZ_WATCH_RESUME_COMMAND_TIMEOUT:-30}"
+final_review_send_timeout="${WIZ_FINAL_REVIEW_SEND_TIMEOUT:-900}"
 final_review_verify_timeout="${WIZ_FINAL_REVIEW_VERIFY_TIMEOUT:-300}"
 final_review_verify_poll="${WIZ_FINAL_REVIEW_VERIFY_POLL:-2}"
 [[ "$auto_resume_max" =~ ^[0-9]+$ ]] || die "WIZ_WATCH_AUTO_RESUME_MAX must be numeric"
 [[ "$auto_resume_backoff" =~ ^[0-9]+$ ]] || die "WIZ_WATCH_AUTO_RESUME_BACKOFF must be numeric"
 [[ "$resume_command_timeout" =~ ^[0-9]+$ && "$resume_command_timeout" -gt 0 ]] \
     || die "WIZ_WATCH_RESUME_COMMAND_TIMEOUT must be a positive integer"
+[[ "$final_review_send_timeout" =~ ^[0-9]+$ && "$final_review_send_timeout" -gt 0 ]] \
+    || die "WIZ_FINAL_REVIEW_SEND_TIMEOUT must be a positive integer"
 [[ "$final_review_verify_timeout" =~ ^[0-9]+$ && "$final_review_verify_timeout" -gt 0 ]] \
     || die "WIZ_FINAL_REVIEW_VERIFY_TIMEOUT must be a positive integer"
 [[ "$final_review_verify_poll" =~ ^[0-9]+$ && "$final_review_verify_poll" -gt 0 ]] \
@@ -476,7 +479,7 @@ else
         || { wiz_review_launch_lock_release "$final_review_lock"; die "could not durably claim final-review send"; }
     final_phase_status=claimed
     log "Sending finalize prompt to agent ${agent_id}"
-    finalize_out="$(run_bounded "$resume_command_timeout" node "$maestro_cli" send "$agent_id" "$(cat "$WIZ_FINALIZE_PROMPT")" 2>&1)"
+    finalize_out="$(run_bounded "$final_review_send_timeout" node "$maestro_cli" send "$agent_id" "$(cat "$WIZ_FINALIZE_PROMPT")" 2>&1)"
     finalize_rc=$?
     log "Finalize agent response received (${#finalize_out} chars, rc=${finalize_rc})"
 fi
