@@ -56,7 +56,11 @@ RELEASE_REPO="story-wizard/wizard-release"
 BUILD_WORKFLOW="build-release.yml"
 
 post_fail() {
-    local stage="$1" msg="$2" text
+    # post_fail <stage> <msg> [exit_code] — exit_code defaults to 1. The
+    # freshness refusal passes 78 so the board poller can distinguish a
+    # deliberate refusal (record once, then stay quiet for that head) from a
+    # transient failure (retry next tick).
+    local stage="$1" msg="$2" code="${3:-1}" text
     text="❌ *Tagged build failed* for \`story-wizard/${repo:-?}\` PR #${pr_number:-?} at stage *${stage}*."$'\n'"\`\`\`"$'\n'"${msg}"$'\n'"\`\`\`"
     # Only post to Slack in real (non --resolve-only) mode.
     if [[ "${resolve_only:-false}" != "true" ]] && wiz_slack_ready; then
@@ -70,7 +74,7 @@ post_fail() {
     fi
     jq -nc --arg repo "${repo:-}" --arg pr "${pr_number:-}" --arg stage "$stage" --arg msg "$msg" \
         '{ok:false, repo:$repo, pr_number:$pr, stage:$stage, message:$msg}'
-    exit 1
+    exit "$code"
 }
 
 # ---- parse flags + positionals ----
@@ -207,8 +211,11 @@ if [[ "$resolve_only" == "true" ]]; then
 fi
 
 # ---- HARD block: refuse a conflicting build unless explicitly forced ----
+# Exit 78 (distinct refusal code): the poller records a per-(head, develop)
+# refusal claim and stops re-dispatching for this head, so the refusal below is
+# posted ONCE per conflict state instead of on every poller tick.
 if [[ "$freshness_conflict" == "true" && "$force" != "true" ]]; then
-    post_fail "freshness" "Refusing to build: branch conflicts with develop and must be reconciled first — ${freshness_conflict_refs}. The author needs to merge/rebase develop into the branch and resolve the conflicts, then re-request the build. (Override with --force to build the stale branch anyway.)"
+    post_fail "freshness" "Refusing to build: branch conflicts with develop and must be reconciled first — ${freshness_conflict_refs}. The author needs to merge/rebase develop into the branch and resolve the conflicts, then re-request the build. (Override with --force to build the stale branch anyway.)" 78
 fi
 
 # ---- board-trigger: self-post the Slack lifecycle root and thread under it ----

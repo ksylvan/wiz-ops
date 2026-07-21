@@ -413,9 +413,13 @@ else
             claim_file="${claim_dir}/${repo}-${pr_number}.json"
             claimed_sha=""
             asked_sha=""
+            refused_sha=""
+            refused_base=""
             if [[ -f "$claim_file" ]]; then
                 claimed_sha="$(jq -r '.head_sha // empty' "$claim_file" 2>/dev/null)"
                 asked_sha="$(jq -r '.asked_sha // empty' "$claim_file" 2>/dev/null)"
+                refused_sha="$(jq -r '.refused_sha // empty' "$claim_file" 2>/dev/null)"
+                refused_base="$(jq -r '.refused_base // empty' "$claim_file" 2>/dev/null)"
             fi
 
             if [[ -n "$head_sha" && "$head_sha" == "$claimed_sha" ]]; then
@@ -505,6 +509,20 @@ else
             fi
 
             # --- first build: no claim yet -> auto-dispatch ---
+            # Refusal suppression: if this exact head was already refused once
+            # (freshness conflict; the refusal was posted to Slack + PR), stay
+            # quiet until the PR head OR develop moves — either side moving can
+            # change the conflict state, and only then is a new attempt (and at
+            # most one new refusal post) warranted.
+            if [[ -n "$head_sha" && -n "$refused_sha" && "$head_sha" == "$refused_sha" ]]; then
+                cur_dev_sha="$(gh api "repos/story-wizard/${repo}/commits/develop" --jq '.sha // empty' 2>/dev/null)"
+                if [[ -n "$cur_dev_sha" && -n "$refused_base" && "$cur_dev_sha" == "$refused_base" ]]; then
+                    log "  build: head ${head_sha:0:8} already refused (conflicts with develop ${refused_base:0:8}, unchanged) — waiting for reconciliation; skipping."
+                    n_build_skip=$((n_build_skip + 1))
+                    continue
+                fi
+                log "  build: develop moved since the refusal of head ${head_sha:0:8} — re-checking the conflict."
+            fi
             if [[ "$dry_run" == "true" ]]; then
                 log "  [dry-run] Functional Review -> would dispatch FIRST tagged build for head ${head_sha:0:8}."
                 n_build=$((n_build + 1))
@@ -512,10 +530,14 @@ else
             fi
 
             # Dispatch. The driver refuses a develop-conflicting build (freshness
-            # gate) and posts that refusal to Slack + PR itself, so we don't
-            # pre-check here. Record the claim ONLY on a successful dispatch so a
-            # failed/refused first build is retried next tick.
-            if "${script_dir}/wiz_pr_build.sh" --board-trigger "$repo" "$pr_number" "$build_thread_ts" >/dev/null 2>&1; then
+            # gate) with exit code 78 AFTER posting that refusal to Slack + PR
+            # itself, so we don't pre-check here. Record the successful-build
+            # claim only on rc 0; record a per-(head, develop) refusal claim on
+            # rc 78 so later ticks skip quietly; any other failure keeps the
+            # retry-next-tick (defer) behavior.
+            build_rc=0
+            "${script_dir}/wiz_pr_build.sh" --board-trigger "$repo" "$pr_number" "$build_thread_ts" >/dev/null 2>&1 || build_rc=$?
+            if [[ "$build_rc" -eq 0 ]]; then
                 mkdir -p "$claim_dir" 2>/dev/null || true
                 jq -nc --arg repo "$repo" --arg pr "$pr_number" --arg sha "$head_sha" \
                     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -523,10 +545,25 @@ else
                     > "$claim_file" 2>/dev/null || true
                 n_build=$((n_build + 1))
                 log "  build: dispatched FIRST build for head ${head_sha:0:8}; claim recorded."
+            elif [[ "$build_rc" -eq 78 ]]; then
+                refused_base_now="$(gh api "repos/story-wizard/${repo}/commits/develop" --jq '.sha // empty' 2>/dev/null)"
+                if ! mkdir -p "$claim_dir" 2>/dev/null \
+                    || ! jq -nc --arg repo "$repo" --arg pr "$pr_number" --arg sha "$head_sha" \
+                        --arg base "$refused_base_now" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                        '{repo:$repo, pr_number:$pr, head_sha:null, built_at:null,
+                          asked_sha:null, asked_at:null,
+                          refused_sha:$sha, refused_base:$base, refused_at:$at}' \
+                        > "$claim_file" 2>/dev/null; then
+                    n_build_skip=$((n_build_skip + 1)); defer_seen=true
+                    log "  build: refusal posted but refusal-claim write failed; retry checkpoint deferred."
+                    continue
+                fi
+                n_build_skip=$((n_build_skip + 1))
+                log "  build: first build for head ${head_sha:0:8} refused (freshness conflict); refusal recorded — quiet until head or develop moves."
             else
                 n_build_skip=$((n_build_skip + 1))
                 defer_seen=true
-                log "  build: driver returned non-zero (it posts its own failure/refusal); no claim recorded — will retry next tick."
+                log "  build: driver failed rc=${build_rc} (it posts its own failure/refusal); no claim recorded — will retry next tick."
             fi
             continue
         fi
