@@ -49,8 +49,19 @@ post_fail() {
         wiz_review_state_mark_status_if "$repo" "$pr_number" "$review_round" "$review_attempt" \
             "$generation" "$recovery_state" failed >/dev/null 2>&1 || true
     fi
-    text="❌ *Code-review resume failed* for \`story-wizard/${repo:-?}\` PR #${pr_number:-?} at stage *${stage}*."$'\n'"\`\`\`"$'\n'"${msg}"$'\n'"\`\`\`"
-    wiz_slack_ready && wiz_slack_post "$dest_channel" "$thread_ts" "$text" >/dev/null 2>&1 || true
+    # Arg-validation (usage) failures are invoker/operator errors, not pipeline
+    # events: log locally and never post to the live channel (2026-07-23
+    # incident: a malformed invocation spammed #wiz-pull-requests).
+    if [[ "$stage" == "args" ]]; then
+        local arg_log="${HOME}/wizard/tmp/wiz-pr-logs/operator-errors.log"
+        mkdir -p "$(dirname "$arg_log")" 2>/dev/null || true
+        printf '[%s] wiz_pr_resume.sh args failure (repo=%s pr=%s thread=%s): %s\n' \
+            "$(date '+%F %T')" "${repo:-?}" "${pr_number:-?}" "${thread_ts:-?}" "$msg" \
+            >> "$arg_log" 2>/dev/null || true
+    else
+        text="❌ *Code-review resume failed* for \`story-wizard/${repo:-?}\` PR #${pr_number:-?} at stage *${stage}*."$'\n'"\`\`\`"$'\n'"${msg}"$'\n'"\`\`\`"
+        wiz_slack_ready && wiz_slack_post "$dest_channel" "$thread_ts" "$text" >/dev/null 2>&1 || true
+    fi
     jq -nc --arg repo "$repo" --arg pr "$pr_number" --arg stage "$stage" --arg msg "$msg" \
         '{ok:false,repo:$repo,pr_number:$pr,stage:$stage,message:$msg}'
     exit 1
