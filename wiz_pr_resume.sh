@@ -139,6 +139,7 @@ canonical_head="$(jq -r '.head_sha // empty' "$state_file")"
 canonical_status="$(jq -r '.status // empty' "$state_file")"
 agent_type="$(jq -r '.active_agent_type // empty' "$state_file")"
 agent_id="$(jq -r --arg a "$agent_type" '.agents[$a].agent_id // empty' "$state_file")"
+worktree_name="$(jq -r --arg a "$agent_type" '.agents[$a].worktree_name // empty' "$state_file")"
 worktree_dir="$(jq -r --arg a "$agent_type" '.agents[$a].worktree_dir // empty' "$state_file")"
 autorun_dir="$(jq -r --arg a "$agent_type" '.agents[$a].autorun_dir // empty' "$state_file")"
 watcher_pid="$(jq -r '.watcher_pid // empty' "$state_file")"
@@ -148,6 +149,56 @@ canonical_generation="$(jq -r '.recovery_generation // 0' "$state_file")"
     || post_fail state "canonical round/attempt is malformed"
 attempt_epoch="$(printf '%s' "$review_attempt" | awk -F- '{print $2}')"
 [[ "$attempt_epoch" =~ ^[0-9]+$ ]] || post_fail state "attempt timestamp is malformed"
+
+# Cross-check the Slack-thread routing record before selecting the Maestro
+# agent. New records carry the exact round/attempt/head. Legacy records may
+# only carry agent/round; those are accepted only when they agree with the
+# canonical active attempt. Any disagreement is ambiguous and must fail closed.
+thread_state_file="$(wiz_review_thread_attempt_file "$repo" "$pr_number" "$thread_ts")"
+if [[ ! -s "$thread_state_file" ]]; then
+    # Backward compatibility for reviews launched before per-PR thread records.
+    thread_state_file="$(wiz_review_thread_state_file "$thread_ts")"
+fi
+[[ -s "$thread_state_file" ]] \
+    || post_fail state_routing "Slack thread state is missing for ${repo}#${pr_number} in ${thread_ts}; refusing to infer the review agent"
+thread_repo="$(jq -r '.repo // empty' "$thread_state_file" 2>/dev/null)"
+thread_pr="$(jq -r '.pr_number // empty' "$thread_state_file" 2>/dev/null)"
+thread_agent="$(jq -r '.agent_type // empty' "$thread_state_file" 2>/dev/null)"
+thread_round="$(jq -r '.review_round // empty' "$thread_state_file" 2>/dev/null)"
+thread_attempt="$(jq -r '.attempt_id // empty' "$thread_state_file" 2>/dev/null)"
+thread_head="$(jq -r '.head_sha // empty' "$thread_state_file" 2>/dev/null)"
+thread_agent_id="$(jq -r '.agent_id // empty' "$thread_state_file" 2>/dev/null)"
+thread_worktree_name="$(jq -r '.worktree_name // empty' "$thread_state_file" 2>/dev/null)"
+thread_worktree_dir="$(jq -r '.worktree_dir // empty' "$thread_state_file" 2>/dev/null)"
+thread_autorun_dir="$(jq -r '.autorun_dir // empty' "$thread_state_file" 2>/dev/null)"
+[[ "$thread_repo" == "$repo" && "$thread_pr" == "$pr_number" ]] \
+    || post_fail state_routing "Slack thread state targets ${thread_repo:-?}#${thread_pr:-?}, not ${repo}#${pr_number}"
+case "$thread_agent" in claude-code|codex|opencode) ;; *) post_fail state_routing "Slack thread state has malformed agent type '${thread_agent:-missing}'" ;; esac
+[[ "$thread_agent" == "$agent_type" ]] \
+    || post_fail state_routing "Slack thread state expects ${thread_agent}, but canonical active agent is ${agent_type:-missing}; refusing to guess"
+if [[ -n "$thread_round" ]]; then
+    [[ "$thread_round" =~ ^[0-9]+$ ]] \
+        || post_fail state_routing "Slack thread state has malformed review round '${thread_round}'"
+    [[ "$thread_round" == "$review_round" ]] \
+        || post_fail state_routing "Slack thread state expects round ${thread_round}, but canonical active round is ${review_round}"
+fi
+if [[ -n "$thread_attempt" ]]; then
+    [[ "$thread_attempt" == "$review_attempt" ]] \
+        || post_fail state_routing "Slack thread state expects attempt ${thread_attempt}, but canonical active attempt is ${review_attempt}"
+fi
+if [[ -n "$thread_head" ]]; then
+    [[ "$thread_head" == "$canonical_head" ]] \
+        || post_fail state_routing "Slack thread state expects head ${thread_head}, but canonical head is ${canonical_head}"
+fi
+[[ -z "$thread_agent_id" || "$thread_agent_id" == "$agent_id" ]] \
+    || post_fail state_routing "Slack thread state agent ID does not match the canonical ${agent_type} agent"
+[[ -z "$thread_worktree_name" || "$thread_worktree_name" == "$worktree_name" ]] \
+    || post_fail state_routing "Slack thread state worktree does not match the canonical ${agent_type} worktree"
+[[ -z "$thread_worktree_dir" || "$thread_worktree_dir" == "$worktree_dir" ]] \
+    || post_fail state_routing "Slack thread state worktree directory does not match the canonical ${agent_type} worktree"
+[[ -z "$thread_autorun_dir" || "$thread_autorun_dir" == "$autorun_dir" ]] \
+    || post_fail state_routing "Slack thread state Auto Run directory does not match the canonical ${agent_type} Auto Run directory"
+
 case "$canonical_status" in
     failed|running|launching|legacy_running) ;;
     completed) ;;

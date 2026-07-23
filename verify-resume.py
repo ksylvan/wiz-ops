@@ -31,7 +31,11 @@ def build_fixture(*, error_pause: bool = True, complete: bool = False,
                   watcher_alive: bool = False,
                   node_hang: bool = False,
                   show_hang: bool = False,
-                  fast_terminal: bool = False) -> tuple[Path, dict[str, str], Path]:
+                  fast_terminal: bool = False,
+                  routing_missing: bool = False,
+                  routing_legacy: bool = False,
+                  routing_conflicting_legacy: bool = False,
+                  routing_overrides: dict[str, object] | None = None) -> tuple[Path, dict[str, str], Path]:
     root = Path(tempfile.mkdtemp(prefix="wiz-resume-fixture-"))
     app = root / "app"
     app.mkdir()
@@ -93,6 +97,47 @@ def build_fixture(*, error_pause: bool = True, complete: bool = False,
     }
     state_file = state_dir / "fixture-1.json"
     state_file.write_text(json.dumps(state) + "\n")
+
+    thread_state_dir = home / "wizard/tmp/wiz-pr-state"
+    thread_state_dir.mkdir(parents=True)
+    routing = {
+        "schema": 1,
+        "repo": "fixture",
+        "pr_number": 1,
+        "thread_ts": "111.222",
+        "agent_type": "claude-code",
+        "review_round": 1,
+        "attempt_id": attempt,
+        "head_sha": head,
+        "agent_id": agent,
+        "worktree_name": "fixture-pr-1-claude-code",
+        "worktree_dir": str(wt),
+        "autorun_dir": str(autorun),
+    }
+    if routing_legacy:
+        routing = {
+            "repo": "fixture",
+            "pr_number": 1,
+            "thread_ts": "111.222",
+            "agent_type": "claude-code",
+            "review_round": 1,
+            "agent_id": agent,
+            "worktree_name": "fixture-pr-1-claude-code",
+            "autorun_dir": str(autorun),
+        }
+    if routing_overrides:
+        routing.update(routing_overrides)
+    if not routing_missing:
+        legacy_routing = routing
+        if routing_conflicting_legacy:
+            legacy_routing = dict(routing)
+            legacy_routing["agent_type"] = "codex"
+            legacy_routing["agent_id"] = "legacy-other-agent"
+        (thread_state_dir / "111.222.json").write_text(json.dumps(legacy_routing) + "\n")
+        if not routing_legacy:
+            attempt_dir = thread_state_dir / "111.222"
+            attempt_dir.mkdir(parents=True)
+            (attempt_dir / "fixture-1.json").write_text(json.dumps(routing) + "\n")
 
     history_dir = home / "maestro/history"
     history_dir.mkdir(parents=True)
@@ -216,6 +261,7 @@ exit 1
         "PATH": str(bindir) + os.pathsep + os.environ["PATH"],
         "MAESTRO_USER_DATA": str(home / "maestro"),
         "WIZ_REVIEW_STATE_DIR": str(state_dir),
+        "WIZ_PR_STATE_DIR": str(thread_state_dir),
         "WIZ_ACTIVE_CHANNEL": "fixture-channel",
         "WIZ_WATCH_GRACE": "0",
         "WIZ_WATCH_POLL": "1",
@@ -382,6 +428,117 @@ def test_live_watcher_returns_already_running_without_mutation() -> None:
         assert run.returncode == 0, run.stdout + run.stderr
         result = json.loads(run.stdout.strip().splitlines()[-1])
         assert result["action"] == "already_running", result
+        assert state_file.read_text() == before
+        assert not (root / "events/node").exists()
+        assert not (root / "events/finalizer").exists()
+    finally:
+        shutil.rmtree(root)
+
+
+def test_thread_routing_agent_mismatch_fails_closed() -> None:
+    root, env, state_file = build_fixture(routing_overrides={"agent_type": "codex"})
+    try:
+        before = state_file.read_text()
+        run = subprocess.run(
+            [str(root / "app/wiz_pr_resume.sh"), "fixture", "1", "111.222"],
+            text=True, capture_output=True, env=env, timeout=30,
+        )
+        assert run.returncode != 0, run.stdout + run.stderr
+        result = json.loads(run.stdout.strip().splitlines()[-1])
+        assert result["stage"] == "state_routing", result
+        assert "expects codex" in result["message"], result
+        assert state_file.read_text() == before
+        assert not (root / "events/node").exists()
+        assert not (root / "events/finalizer").exists()
+    finally:
+        shutil.rmtree(root)
+
+
+def test_thread_routing_attempt_mismatch_fails_closed() -> None:
+    root, env, state_file = build_fixture(routing_overrides={"attempt_id": "r1-1-2-3"})
+    try:
+        before = state_file.read_text()
+        run = subprocess.run(
+            [str(root / "app/wiz_pr_resume.sh"), "fixture", "1", "111.222"],
+            text=True, capture_output=True, env=env, timeout=30,
+        )
+        assert run.returncode != 0, run.stdout + run.stderr
+        result = json.loads(run.stdout.strip().splitlines()[-1])
+        assert result["stage"] == "state_routing", result
+        assert "expects attempt" in result["message"], result
+        assert state_file.read_text() == before
+        assert not (root / "events/node").exists()
+        assert not (root / "events/finalizer").exists()
+    finally:
+        shutil.rmtree(root)
+
+
+def test_missing_thread_routing_fails_closed() -> None:
+    root, env, state_file = build_fixture(routing_missing=True)
+    try:
+        before = state_file.read_text()
+        run = subprocess.run(
+            [str(root / "app/wiz_pr_resume.sh"), "fixture", "1", "111.222"],
+            text=True, capture_output=True, env=env, timeout=30,
+        )
+        assert run.returncode != 0, run.stdout + run.stderr
+        result = json.loads(run.stdout.strip().splitlines()[-1])
+        assert result["stage"] == "state_routing", result
+        assert "missing" in result["message"], result
+        assert state_file.read_text() == before
+        assert not (root / "events/node").exists()
+        assert not (root / "events/finalizer").exists()
+    finally:
+        shutil.rmtree(root)
+
+
+def test_exact_thread_record_wins_over_conflicting_legacy_pointer() -> None:
+    root, env, state_file = build_fixture(
+        error_pause=False, routing_conflicting_legacy=True,
+    )
+    try:
+        run = subprocess.run(
+            [str(root / "app/wiz_pr_resume.sh"), "fixture", "1", "111.222"],
+            text=True, capture_output=True, env=env, timeout=30,
+        )
+        assert run.returncode == 0, run.stdout + run.stderr
+        result = json.loads(run.stdout.strip().splitlines()[-1])
+        assert result["action"] == "resumed_playbooks", result
+        state = json.loads(state_file.read_text())
+        assert state["status"] == "running", state
+    finally:
+        shutil.rmtree(root)
+
+
+def test_legacy_thread_routing_matching_agent_still_resumes() -> None:
+    root, env, state_file = build_fixture(error_pause=False, routing_legacy=True)
+    try:
+        run = subprocess.run(
+            [str(root / "app/wiz_pr_resume.sh"), "fixture", "1", "111.222"],
+            text=True, capture_output=True, env=env, timeout=30,
+        )
+        assert run.returncode == 0, run.stdout + run.stderr
+        result = json.loads(run.stdout.strip().splitlines()[-1])
+        assert result["action"] == "resumed_playbooks", result
+        state = json.loads(state_file.read_text())
+        assert state["status"] == "running", state
+    finally:
+        shutil.rmtree(root)
+
+
+def test_legacy_thread_routing_agent_mismatch_fails_closed() -> None:
+    root, env, state_file = build_fixture(
+        routing_legacy=True, routing_overrides={"agent_type": "codex"},
+    )
+    try:
+        before = state_file.read_text()
+        run = subprocess.run(
+            [str(root / "app/wiz_pr_resume.sh"), "fixture", "1", "111.222"],
+            text=True, capture_output=True, env=env, timeout=30,
+        )
+        assert run.returncode != 0, run.stdout + run.stderr
+        result = json.loads(run.stdout.strip().splitlines()[-1])
+        assert result["stage"] == "state_routing", result
         assert state_file.read_text() == before
         assert not (root / "events/node").exists()
         assert not (root / "events/finalizer").exists()
@@ -644,6 +801,12 @@ if __name__ == "__main__":
     test_manual_generation_claim_rejects_status_race()
     test_stale_head_fails_without_mutating_or_launching()
     test_live_watcher_returns_already_running_without_mutation()
+    test_thread_routing_agent_mismatch_fails_closed()
+    test_thread_routing_attempt_mismatch_fails_closed()
+    test_missing_thread_routing_fails_closed()
+    test_exact_thread_record_wins_over_conflicting_legacy_pointer()
+    test_legacy_thread_routing_matching_agent_still_resumes()
+    test_legacy_thread_routing_agent_mismatch_fails_closed()
     test_resume_command_timeout_fails_closed()
     test_show_agent_timeout_releases_without_claiming_generation()
     test_fast_terminal_child_cannot_be_regressed_to_running()

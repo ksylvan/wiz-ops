@@ -25,6 +25,7 @@ archive_source=""
 orphan_stage=""
 orphan_installed_dir=""
 orphan_source=""
+thread_state_backup=""
 
 rollback_archive_transaction() {
     local dir="" failed=0 collision_dir=""
@@ -69,8 +70,17 @@ rollback_orphan_transaction() {
     return "$failed"
 }
 
+rollback_thread_state_transaction() {
+    [[ -n "$thread_state_backup" ]] || return 0
+    wiz_review_thread_state_restore "$repo" "$pr_number" "$thread_ts" "$thread_state_backup" >/dev/null 2>&1
+}
+
 release_lock() {
     wiz_review_launch_lock_release "$lock_dir"
+}
+exit_cleanup() {
+    [[ -n "$thread_state_backup" && -d "$thread_state_backup" ]] && rm -rf "$thread_state_backup"
+    release_lock
 }
 handle_signal() {
     local code="$1"
@@ -78,6 +88,7 @@ handle_signal() {
     # After launch, fail-closed state is safer than permitting a duplicate run.
     if [[ "$agent_launched" == "false" && -n "$rollback_state" && -f "$rollback_state" && -n "${state_file:-}" ]]; then
         mv "$rollback_state" "$state_file" 2>/dev/null || true
+        rollback_thread_state_transaction || true
     fi
     if [[ "$agent_launched" == "false" ]]; then
         rollback_orphan_transaction || true
@@ -86,7 +97,7 @@ handle_signal() {
     release_lock
     exit "$code"
 }
-trap release_lock EXIT
+trap exit_cleanup EXIT
 trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
 
@@ -95,6 +106,7 @@ post_fail() {
     if [[ "$agent_launched" == "false" ]]; then
         if [[ -n "$rollback_state" && -f "$rollback_state" && -n "${state_file:-}" ]]; then
             mv "$rollback_state" "$state_file" 2>/dev/null || true
+            rollback_thread_state_transaction || true
         fi
         rollback_orphan_transaction || true
         rollback_archive_transaction || true
@@ -319,6 +331,16 @@ if ! wiz_review_state_record_launch "$repo" "$pr_number" "$next_round" "$agent_t
     "$current_head" "$thread_ts" "$agent_id" "$worktree_name" "$worktree_dir" "$autorun_dir" "launching" "$attempt_id"; then
     post_fail "state" "could not persist pre-launch canonical state"
 fi
+if [[ -n "$thread_ts" ]]; then
+    thread_state_backup="$(mktemp -d -t wiz-thread-state.XXXXXX)" \
+        || post_fail "state_routing" "could not create Slack thread state rollback snapshot"
+    wiz_review_thread_state_snapshot "$repo" "$pr_number" "$thread_ts" "$thread_state_backup" \
+        || post_fail "state_routing" "could not snapshot Slack thread state"
+    wiz_review_thread_state_write "$repo" "$pr_number" "$thread_ts" "$agent_type" \
+        "$next_round" "$attempt_id" "$current_head" "$agent_id" "$worktree_name" \
+        "$worktree_dir" "$autorun_dir" \
+        || post_fail "state_routing" "could not persist attempt-aware Slack thread state"
+fi
 
 # Install the complete staged directory with one same-filesystem rename. Existing
 # round history is never overwritten; a collision becomes a unique retry dir.
@@ -417,17 +439,8 @@ fi
 # serialize GitHub pushes, so retaining the block is the only fail-closed choice;
 # a human may dismiss it after inspecting the verified replacement review.
 
-# Keep the Slack thread routing backstop aligned with the active round.
-if [[ -n "$thread_ts" ]]; then
-    state_dir="${WIZ_PR_STATE_DIR:-${HOME}/wizard/tmp/wiz-pr-state}"
-    mkdir -p "$state_dir" 2>/dev/null && jq -nc \
-        --arg repo "$repo" --arg pr "$pr_number" --arg agent "$agent_type" \
-        --arg wt "$worktree_name" --arg autorun "$autorun_dir" --arg agent_id "$agent_id" \
-        --arg thread "$thread_ts" --argjson round "$next_round" \
-        '{repo:$repo,pr_number:$pr,agent_type:$agent,worktree_name:$wt,
-          autorun_dir:$autorun,agent_id:$agent_id,thread_ts:$thread,review_round:$round}' \
-        > "${state_dir}/${thread_ts}.json" 2>/dev/null || true
-fi
+# Thread routing was initialized before Maestro launch with the active round,
+# attempt, agent, and exact head.
 
 # The child already emitted the authoritative terminal lifecycle message. Do not
 # overwrite it with board/status/start side effects from this parent.

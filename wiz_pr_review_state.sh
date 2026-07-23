@@ -17,6 +17,116 @@ wiz_review_history_dir() {
     printf '%s/%s/%s-pr-%s' "${WIZ_REVIEW_HISTORY_ROOT:-${_wiz_review_history_root_default}}" "$1" "$1" "$2"
 }
 
+_wiz_review_thread_state_dir_default="${HOME}/wizard/tmp/wiz-pr-state"
+
+wiz_review_thread_state_dir() {
+    printf '%s' "${WIZ_PR_STATE_DIR:-${_wiz_review_thread_state_dir_default}}"
+}
+
+wiz_review_thread_state_file() {
+    printf '%s/%s.json' "$(wiz_review_thread_state_dir)" "$1"
+}
+
+wiz_review_thread_attempt_dir() {
+    printf '%s/%s' "$(wiz_review_thread_state_dir)" "$1"
+}
+
+wiz_review_thread_attempt_file() {
+    printf '%s/%s-%s.json' "$(wiz_review_thread_attempt_dir "$3")" "$1" "$2"
+}
+
+# Persist the Slack-thread routing record for exactly one review attempt. Keep
+# one record per repo/PR beneath the thread so multi-PR review threads cannot
+# overwrite each other; the legacy top-level file remains a best-effort
+# backstop for older read paths.
+wiz_review_thread_state_write() {
+    local repo="$1" pr="$2" thread="$3" agent="$4" round="$5" attempt="$6" head="$7"
+    local agent_id="$8" worktree_name="$9" worktree_dir="${10}" autorun_dir="${11}"
+    local dir attempt_dir attempt_file attempt_tmp legacy_tmp rc
+    [[ -n "$repo" && "$pr" =~ ^[0-9]+$ && -n "$thread" && -n "$agent" \
+        && "$round" =~ ^[0-9]+$ && -n "$attempt" && -n "$head" \
+        && -n "$agent_id" && -n "$worktree_name" && -n "$worktree_dir" \
+        && -n "$autorun_dir" ]] || return 1
+    dir="$(wiz_review_thread_state_dir)"
+    attempt_dir="$(wiz_review_thread_attempt_dir "$thread")"
+    mkdir -p "$attempt_dir" || return 1
+    attempt_file="$(wiz_review_thread_attempt_file "$repo" "$pr" "$thread")"
+    attempt_tmp="${attempt_dir}/.${repo}-${pr}.$$.tmp"
+    legacy_tmp="${dir}/.${thread}.$$.tmp"
+    rc=0
+    jq -nc \
+        --arg repo "$repo" --arg pr "$pr" --arg thread "$thread" \
+        --arg agent "$agent" --argjson round "$round" --arg attempt "$attempt" \
+        --arg head "$head" --arg id "$agent_id" --arg wt "$worktree_name" \
+        --arg wt_dir "$worktree_dir" --arg autorun "$autorun_dir" \
+        '{schema:1,repo:$repo,pr_number:$pr,thread_ts:$thread,agent_type:$agent,
+          review_round:$round,attempt_id:$attempt,head_sha:$head,agent_id:$id,
+          worktree_name:$wt,worktree_dir:$wt_dir,autorun_dir:$autorun}' \
+        > "$attempt_tmp" && mv "$attempt_tmp" "$attempt_file" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        cp "$attempt_file" "$legacy_tmp" \
+            && mv "$legacy_tmp" "$(wiz_review_thread_state_file "$thread")" || rc=$?
+    fi
+    rm -f "$attempt_tmp" "$legacy_tmp" 2>/dev/null || true
+    return "$rc"
+}
+
+# Snapshot/restore the two routing paths affected by a launch. The exact
+# per-PR record is protected by the per-PR launch lock. The legacy top-level
+# backstop is shared by multi-PR threads, so restore it only while it still
+# points at this repo/PR; never clobber a newer record for another PR.
+wiz_review_thread_state_snapshot() {
+    local repo="$1" pr="$2" thread="$3" backup_dir="$4"
+    local exact_file legacy_file
+    [[ -n "$repo" && "$pr" =~ ^[0-9]+$ && -n "$thread" && -n "$backup_dir" ]] || return 1
+    mkdir -p "$backup_dir" || return 1
+    exact_file="$(wiz_review_thread_attempt_file "$repo" "$pr" "$thread")"
+    legacy_file="$(wiz_review_thread_state_file "$thread")"
+    if [[ -e "$exact_file" ]]; then
+        cp "$exact_file" "$backup_dir/exact.json" || return 1
+    else
+        : > "$backup_dir/exact.absent" || return 1
+    fi
+    if [[ -e "$legacy_file" ]]; then
+        cp "$legacy_file" "$backup_dir/legacy.json" || return 1
+    else
+        : > "$backup_dir/legacy.absent" || return 1
+    fi
+}
+
+wiz_review_thread_state_restore() {
+    local repo="$1" pr="$2" thread="$3" backup_dir="$4"
+    local exact_file legacy_file tmp current_repo current_pr
+    [[ -n "$repo" && "$pr" =~ ^[0-9]+$ && -n "$thread" && -d "$backup_dir" ]] || return 1
+    exact_file="$(wiz_review_thread_attempt_file "$repo" "$pr" "$thread")"
+    legacy_file="$(wiz_review_thread_state_file "$thread")"
+    if [[ -f "$backup_dir/exact.json" ]]; then
+        mkdir -p "$(dirname "$exact_file")" || return 1
+        tmp="$(dirname "$exact_file")/.restore-${repo}-${pr}.$$.tmp"
+        cp "$backup_dir/exact.json" "$tmp" && mv "$tmp" "$exact_file" || { rm -f "$tmp"; return 1; }
+    elif [[ -f "$backup_dir/exact.absent" ]]; then
+        rm -f "$exact_file" 2>/dev/null || return 1
+        rmdir "$(dirname "$exact_file")" 2>/dev/null || true
+    fi
+    current_repo=""
+    current_pr=""
+    if [[ -s "$legacy_file" ]]; then
+        current_repo="$(jq -r '.repo // empty' "$legacy_file" 2>/dev/null)"
+        current_pr="$(jq -r '.pr_number // empty' "$legacy_file" 2>/dev/null)"
+    fi
+    # Another review may have claimed the shared legacy pointer after this
+    # launch wrote it. Leave that newer record alone.
+    if [[ -s "$legacy_file" && ( "$current_repo" != "$repo" || "$current_pr" != "$pr" ) ]]; then
+        return 0
+    fi
+    if [[ -f "$backup_dir/legacy.json" ]]; then
+        tmp="$(dirname "$legacy_file")/.restore-${thread}.$$.tmp"
+        cp "$backup_dir/legacy.json" "$tmp" && mv "$tmp" "$legacy_file" || { rm -f "$tmp"; return 1; }
+    elif [[ -f "$backup_dir/legacy.absent" ]]; then
+        rm -f "$legacy_file" 2>/dev/null || return 1
+    fi
+}
+
 # Synchronize an isolated persistent review worktree to the exact GitHub PR head.
 # Do not trust @{upstream}: gh pr checkout --branch may point it at the generated
 # review branch, which remains frozen after later PR pushes. Fetching the pull ref

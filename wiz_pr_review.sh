@@ -101,6 +101,7 @@ fresh_lock_dir=""
 run_log=""
 fresh_exit_cleanup() {
     [[ -n "$run_log" ]] && rm -f "$run_log"
+    [[ -n "${thread_state_backup:-}" && -d "${thread_state_backup:-}" ]] && rm -rf "$thread_state_backup"
     wiz_review_launch_lock_release "$fresh_lock_dir"
 }
 trap fresh_exit_cleanup EXIT
@@ -143,11 +144,15 @@ worktree_dir="${HOME}/wizard/worktrees/${repo}/${worktree_name}"
 autorun_dir="${HOME}/wizard/worktrees/autorun/${repo}/${worktree_name}"
 state_file="$(wiz_review_state_file "$repo" "$pr_number")"
 run_log="$(mktemp -t wiz_pr_review.XXXXXX)"
+thread_state_backup=""
 fresh_setup_maybe=false
 fresh_launch_maybe=false
 
 fresh_cleanup_prelaunch() {
     rm -f "$state_file"
+    if [[ -n "$thread_state_backup" ]]; then
+        wiz_review_thread_state_restore "$repo" "$pr_number" "$thread_ts" "$thread_state_backup" >/dev/null 2>&1 || true
+    fi
     "${script_dir}/maestro_wt.sh" --delete --force "$repo" "pr-${pr_number}" "$agent_type" >/dev/null 2>&1 || true
 }
 fresh_handle_signal() {
@@ -197,6 +202,16 @@ if ! wiz_review_state_record_launch "$repo" "$pr_number" "$review_round" "$agent
     rm -f "$state_file"
     post_fail "state" "could not initialize canonical review state; prepared agent was removed"
 fi
+if [[ -n "$thread_ts" ]]; then
+    thread_state_backup="$(mktemp -d -t wiz-thread-state.XXXXXX)" \
+        || post_fail "state_routing" "could not create Slack thread state rollback snapshot"
+    wiz_review_thread_state_snapshot "$repo" "$pr_number" "$thread_ts" "$thread_state_backup" \
+        || post_fail "state_routing" "could not snapshot Slack thread state"
+    wiz_review_thread_state_write "$repo" "$pr_number" "$thread_ts" "$agent_type" \
+        "$review_round" "$attempt_id" "$review_head" "$agent_id" "$worktree_name" \
+        "$worktree_dir" "$autorun_dir" \
+        || post_fail "state_routing" "could not persist attempt-aware Slack thread state"
+fi
 
 playbook_dir="${autorun_dir}/development/code-review"
 fresh_launch_maybe=true
@@ -232,24 +247,8 @@ fi
 # startup effects. The finalizer uses a bounded long-wait acquisition before
 # any terminal transition or publication.
 
-# ---- persist thread -> PR state so a later "re-review" reply can recover it ----
-# A re-review request arrives as a threaded reply with NO PR link, so it cannot
-# re-parse repo/pr from its own text. We key a small JSON record by the Slack
-# thread (the triggering message's ts, which becomes the thread parent for all
-# pipeline posts). wiz_pr_rereview.sh reads it back. Best-effort: never fail the
-# review if the state write doesn't work.
-if [[ -n "${thread_ts:-}" ]]; then
-    state_dir="${WIZ_PR_STATE_DIR:-${HOME}/wizard/tmp/wiz-pr-state}"
-    mkdir -p "$state_dir" 2>/dev/null \
-        && jq -nc \
-            --arg repo "$repo" --arg pr "$pr_number" --arg agent "$agent_type" \
-            --arg wt "$worktree_name" --arg autorun "$autorun_dir" \
-            --arg agent_id "$agent_id" --arg thread "$thread_ts" \
-            '{repo:$repo, pr_number:$pr, agent_type:$agent, worktree_name:$wt,
-              autorun_dir:$autorun, agent_id:$agent_id, thread_ts:$thread}' \
-            > "${state_dir}/${thread_ts}.json" 2>/dev/null \
-        || true
-fi
+# Thread routing was initialized before Maestro launch; a fast terminal child
+# must remain the only source of terminal side effects.
 
 # A terminal child already emitted authoritative completion/failure side effects.
 # Never follow them with a stale in-progress reaction, board transition, or
