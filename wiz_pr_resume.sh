@@ -184,7 +184,7 @@ thread_worktree_dir="$(jq -r '.worktree_dir // empty' "$thread_state_file" 2>/de
 thread_autorun_dir="$(jq -r '.autorun_dir // empty' "$thread_state_file" 2>/dev/null)"
 [[ "$thread_repo" == "$repo" && "$thread_pr" == "$pr_number" ]] \
     || post_fail state_routing "Slack thread state targets ${thread_repo:-?}#${thread_pr:-?}, not ${repo}#${pr_number}"
-case "$thread_agent" in claude-code|codex|opencode) ;; *) post_fail state_routing "Slack thread state has malformed agent type '${thread_agent:-missing}'" ;; esac
+case "$thread_agent" in claude-code|codex|opencode|grok) ;; *) post_fail state_routing "Slack thread state has malformed agent type '${thread_agent:-missing}'" ;; esac
 [[ "$thread_agent" == "$agent_type" ]] \
     || post_fail state_routing "Slack thread state expects ${thread_agent}, but canonical active agent is ${agent_type:-missing}; refusing to guess"
 if [[ -n "$thread_round" ]]; then
