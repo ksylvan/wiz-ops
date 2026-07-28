@@ -9,7 +9,7 @@
 # `gh pr checkout`, and the auto-run launch.
 
 VALID_REPOS=(wizard wizard-ai wizard-core wizard-link wizard-release wizard-spec Qt-Advanced-Docking-System)
-VALID_AGENT_TYPES=(claude-code codex opencode)
+VALID_AGENT_TYPES=(claude-code codex opencode grok)
 PLAYBOOKS_SOURCE="${HOME}/src/Maestro-Playbooks/Development/Code-Review"
 
 # GitHub fallback for the Code Review playbooks, used when PLAYBOOKS_SOURCE is

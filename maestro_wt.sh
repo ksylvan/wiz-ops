@@ -6,7 +6,7 @@
 #        maestro_wt.sh --delete [--force] <repo> <worktree_name> [agent_type]
 
 VALID_REPOS=(wizard wizard-ai wizard-core wizard-link wizard-release wizard-spec Qt-Advanced-Docking-System)
-VALID_AGENT_TYPES=(claude-code codex opencode)
+VALID_AGENT_TYPES=(claude-code codex opencode grok)
 
 format_options() {
     local formatted=""
