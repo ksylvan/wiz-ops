@@ -80,7 +80,7 @@ Sets up a full, isolated PR review environment for a given repo and PR number.
 
 | Argument | Description |
 | --- | --- |
-| `repo` | One of: `wizard`, `wizard-ai`, `wizard-core`, `wizard-release`, `wizard-spec` |
+| `repo` | One of: `wizard`, `wizard-ai`, `wizard-core`, `wizard-link`, `wizard-release`, `wizard-spec`, `Qt-Advanced-Docking-System`, `OpenColorIO` |
 | `pr_number` | The PR number (numeric) |
 | `agent_type` | Optional one of: `claude-code`, `codex`, `opencode`. Defaults to `claude-code` |
 
@@ -143,7 +143,7 @@ Maestro agent.
 
 | Argument | Description |
 | --- | --- |
-| `repo` | One of: `wizard`, `wizard-ai`, `wizard-core`, `wizard-release`, `wizard-spec` |
+| `repo` | One of: `wizard`, `wizard-ai`, `wizard-core`, `wizard-link`, `wizard-release`, `wizard-spec`, `Qt-Advanced-Docking-System`, `OpenColorIO` |
 | `worktree_name` | Free-form label for the worktree. Allowed characters: letters, digits, `.`, `_`, `-` |
 | `agent_type` | Optional one of: `claude-code`, `codex`, `opencode`. Defaults to `claude-code` |
 
@@ -410,7 +410,7 @@ detached watcher.
 
 | Argument | Description |
 | --- | --- |
-| `repo` | One of: `wizard`, `wizard-ai`, `wizard-core`, `wizard-link`, `wizard-release`, `wizard-spec` |
+| `repo` | One of: `wizard`, `wizard-ai`, `wizard-core`, `wizard-link`, `wizard-release`, `wizard-spec`, `Qt-Advanced-Docking-System`, `OpenColorIO` |
 | `pr_number` | The PR number (numeric) |
 | `agent_type` | Optional agent type. Defaults to `WIZ_DEFAULT_AGENT_TYPE` (`claude-code`) |
 | `thread_ts` | Optional Slack thread timestamp to post all output under |
@@ -558,7 +558,7 @@ pipeline to mark a PR as "AI Review 1", but usable standalone.
 
 | Argument | Description |
 | --- | --- |
-| `repo` | One of: `wizard`, `wizard-ai`, `wizard-core`, `wizard-link`, `wizard-release`, `wizard-spec` |
+| `repo` | One of: `wizard`, `wizard-ai`, `wizard-core`, `wizard-link`, `wizard-release`, `wizard-spec`, `Qt-Advanced-Docking-System`, `OpenColorIO` |
 | `pr_number` | The PR number (numeric) |
 | `status_name` | Exact Status option name, e.g. `"AI Review 1"` |
 
