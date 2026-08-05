@@ -405,7 +405,8 @@ detached watcher.
 **Usage:**
 
 ```zsh
-./wiz_pr_review.sh <repo> <pr_number> [agent_type] [thread_ts]
+./wiz_pr_review.sh <repo> <pr_number> <thread_ts>
+./wiz_pr_review.sh <repo> <pr_number> <agent_type> <thread_ts>
 ```
 
 | Argument | Description |

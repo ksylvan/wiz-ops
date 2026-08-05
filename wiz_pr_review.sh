@@ -13,7 +13,9 @@
 # channel), so the agent does not need to post anything and can reply NO_REPLY.
 #
 # Usage:
-#   wiz_pr_review.sh [--board-trigger] <repo> <pr_number> [agent_type] [thread_ts]
+#   wiz_pr_review.sh <repo> <pr_number> <thread_ts>
+#   wiz_pr_review.sh <repo> <pr_number> <agent_type> <thread_ts>
+#   wiz_pr_review.sh --board-trigger <repo> <pr_number> [agent_type]
 #
 # --board-trigger: invoked by wiz_pr_poll_board.sh (GitHub board status change,
 #   not a Slack message). There is no triggering Slack message to thread under,
@@ -81,8 +83,31 @@ fi
 
 repo="$1"
 pr_number="$2"
-agent_type="${3:-$WIZ_DEFAULT_AGENT_TYPE}"
+agent_arg="${3:-}"
 thread_ts="${4:-}"
+
+# For a human-triggered review, the natural three-argument form is
+#   <repo> <pr> <trigger-message-ts>
+# Treat a Slack timestamp in argv[3] as the thread, not as an agent type. The
+# previous positional ambiguity silently discarded the thread after parity
+# selected the real agent, causing every lifecycle post to escape to channel
+# root. Keep the four-argument explicit-agent form for callers that need it.
+if [[ "$board_trigger" != "true" && $# -eq 3 \
+    && "$agent_arg" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    thread_ts="$agent_arg"
+    agent_arg=""
+fi
+agent_type="${agent_arg:-$WIZ_DEFAULT_AGENT_TYPE}"
+
+# Human-triggered reviews must never post lifecycle messages at channel root.
+# Fail locally, before PR lookup or post_fail(), when routing is absent or
+# malformed. Board-triggered reviews intentionally create their own root.
+if [[ "$board_trigger" != "true" \
+    && ! "$thread_ts" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    jq -nc --arg repo "$repo" --arg pr "$pr_number" \
+        '{ok:false,repo:$repo,pr_number:$pr,stage:"args",message:"human-triggered review requires the Slack trigger message ts"}'
+    exit 1
+fi
 
 # Crucible round 1 is always assigned by parity when alternation is enabled.
 # Explicit agent arguments remain supported when the feature toggle is off.
